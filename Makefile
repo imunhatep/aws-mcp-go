@@ -4,7 +4,7 @@ VERSION ?= dev
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo none)
 LDFLAGS := -X $(PKG)/internal/version.Version=$(VERSION) -X $(PKG)/internal/version.Commit=$(COMMIT)
 
-IMAGE := aws-mcp
+IMAGE ?= ghcr.io/imunhatep/aws-mcp-go
 PLATFORMS := linux/amd64,linux/arm64
 
 .PHONY: build test tidy vendor run image image-multiarch
@@ -27,8 +27,8 @@ image: vendor
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) \
 		-t $(IMAGE):$(VERSION) .
 
-# Build a multi-arch manifest. Use IMAGE=registry/name to push, e.g.:
-#   make image-multiarch IMAGE=ghcr.io/imunhatep/aws-mcp-go
+# Build a multi-arch manifest. Override IMAGE=registry/name to tag elsewhere, e.g.:
+#   make image-multiarch IMAGE=ghcr.io/someone/aws-mcp-go
 image-multiarch: vendor
 	podman build --platform $(PLATFORMS) --manifest $(IMAGE):$(VERSION) \
 		--build-arg VERSION=$(VERSION) --build-arg COMMIT=$(COMMIT) .

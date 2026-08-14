@@ -27,8 +27,8 @@ The image compiles from the vendored dependency tree, so `make image` runs
 inside the image.
 
 ```sh
-make image                  # -> aws-mcp:dev
-make image VERSION=0.1.0    # -> aws-mcp:0.1.0
+make image                  # -> ghcr.io/imunhatep/aws-mcp-go:dev
+make image VERSION=v0.1.0   # -> ghcr.io/imunhatep/aws-mcp-go:v0.1.0
 ```
 
 Tagged releases publish a `linux/amd64,linux/arm64` manifest to GHCR (see
@@ -47,7 +47,7 @@ podman run --rm -d \
   -e AWS_PROFILE \
   -e AWS_REGION \
   -v ~/.aws:/home/nonroot/.aws:ro \
-  -p 127.0.0.1:3040:3040 aws-mcp:dev
+  -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:dev
 ```
 
 Static or role credentials from the current shell instead, in cross-account
@@ -56,7 +56,7 @@ mode:
 ```sh
 podman run --rm -p 127.0.0.1:3040:3040 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION \
-  aws-mcp:dev serve --assume-role
+  ghcr.io/imunhatep/aws-mcp-go:dev serve --assume-role
 ```
 
 > The runtime image is distroless and has **no shell**, so a mounted profile
@@ -90,13 +90,13 @@ podman run --rm -d --name aws-mcp \
   -e AWS_PROFILE -e MCP_CACHE_DIR=/cache -e MCP_CACHE_TTL=6h \
   -v ~/.aws:/home/nonroot/.aws:ro \
   -v aws-mcp-cache:/cache:U \
-  -p 127.0.0.1:3040:3040 aws-mcp:dev
+  -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:dev
 ```
 
-Multi-arch manifest (override `IMAGE` to tag for a registry):
+Multi-arch manifest (override `IMAGE` to tag for a different registry):
 
 ```sh
-make image-multiarch IMAGE=ghcr.io/imunhatep/aws-mcp-go VERSION=0.1.0
+make image-multiarch VERSION=v0.1.0
 ```
 
 ### Claude Code
@@ -338,7 +338,7 @@ The container build reads `vendor/` too.
 | `make test` | `go test ./...` |
 | `make tidy` | `go mod tidy && go mod vendor` |
 | `make run` | Build, then `serve` |
-| `make image` | Vendor, then build `aws-mcp:$(VERSION)` with podman |
+| `make image` | Vendor, then build `$(IMAGE):$(VERSION)` (defaults to `ghcr.io/imunhatep/aws-mcp-go:dev`) with podman |
 | `make image-multiarch` | Same as a `linux/amd64,linux/arm64` manifest |
 
 ### CI & releases
