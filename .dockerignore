@@ -1,0 +1,16 @@
+# vendor/ is deliberately NOT ignored here: the Containerfile builds with
+# -mod=vendor because awslib is consumed through a local `replace`.
+.git
+.github
+.idea
+.claude
+.remember
+bin
+dist
+*.out
+*.csv
+.env
+README.md
+CLAUDE.md
+Containerfile
+.dockerignore

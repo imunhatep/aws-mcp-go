@@ -1,0 +1,94 @@
+name: ci
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # go.mod carries `replace github.com/imunhatep/awslib => ../pkgs/awslib`
+      # for local development; that path does not exist on a runner. Drop it so
+      # the version pinned in `require` is fetched from the module proxy, and
+      # tidy to populate the go.sum entries the replace made unnecessary.
+      - name: Resolve awslib from its published tag
+        run: |
+          set -euo pipefail
+          go mod edit -dropreplace=github.com/imunhatep/awslib
+          go mod tidy
+
+      - name: Check gofmt
+        run: |
+          set -euo pipefail
+          unformatted="$(gofmt -l cmd internal pkg)"
+          if [ -n "${unformatted}" ]; then
+            echo "::error::gofmt needed on:"
+            echo "${unformatted}"
+            exit 1
+          fi
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race ./...
+
+      - name: Build
+        run: make build
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The Containerfile builds with `-mod=vendor` (see below), so vendor/ has
+      # to exist in the build context before the image build starts. vendor/ is
+      # gitignored, so it is generated here rather than committed.
+      - name: Resolve awslib and vendor dependencies
+        run: |
+          set -euo pipefail
+          go mod edit -dropreplace=github.com/imunhatep/awslib
+          go mod tidy
+          go mod vendor
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Build only; publishing happens in the release workflow.
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          push: false
+          build-args: |
+            VERSION=ci
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

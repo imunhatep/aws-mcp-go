@@ -1,0 +1,184 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # See ci.yml: the local awslib `replace` is dropped so the tag pinned in
+      # `require` is resolved from the module proxy instead.
+      - name: Resolve awslib from its published tag
+        run: |
+          set -euo pipefail
+          go mod edit -dropreplace=github.com/imunhatep/awslib
+          go mod tidy
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./...
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        goos: [darwin, linux]
+        goarch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve awslib from its published tag
+        run: |
+          set -euo pipefail
+          go mod edit -dropreplace=github.com/imunhatep/awslib
+          go mod tidy
+
+      - name: Build
+        env:
+          VERSION: ${{ github.ref_name }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          COMMIT="${GITHUB_SHA::7}"
+          mkdir -p dist
+          CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath \
+            -ldflags "-s -w -X github.com/imunhatep/aws-mcp-go/internal/version.Version=${VERSION} -X github.com/imunhatep/aws-mcp-go/internal/version.Commit=${COMMIT}" \
+            -o dist/aws-mcp ./cmd/aws-mcp
+
+      - name: Package
+        env:
+          VERSION: ${{ github.ref_name }}
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          set -euo pipefail
+          [ -f README.md ] && cp README.md dist/
+          [ -f LICENSE ] && cp LICENSE dist/
+          FILES=(aws-mcp)
+          [ -f dist/README.md ] && FILES+=(README.md)
+          [ -f dist/LICENSE ] && FILES+=(LICENSE)
+          tar -czf "aws-mcp_${VERSION}_${GOOS}_${GOARCH}.tar.gz" -C dist "${FILES[@]}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-artifact-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: aws-mcp_*.tar.gz
+          if-no-files-found: error
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # The Containerfile builds with `-mod=vendor`, so vendor/ must be present
+      # in the build context; it is gitignored, so generate it here.
+      - name: Resolve awslib and vendor dependencies
+        run: |
+          set -euo pipefail
+          go mod edit -dropreplace=github.com/imunhatep/awslib
+          go mod tidy
+          go mod vendor
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Derive image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=semver,pattern={{major}}
+            type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Containerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release:
+    needs: [build, image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-artifact-*
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate checksums
+        working-directory: artifacts
+        run: sha256sum *.tar.gz > checksums.txt
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/*.tar.gz
+            artifacts/checksums.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true
