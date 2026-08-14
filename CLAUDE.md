@@ -20,9 +20,9 @@ go mod tidy                              # after changing dependencies
 
 Version/commit are injected at build time via `-ldflags` into `internal/version`.
 
-### awslib local dependency
+### awslib dependency
 
-`go.mod` has `replace github.com/imunhatep/awslib => ../pkgs/awslib`. A local checkout of `awslib` at that path is required to build. Adjust the path to match your checkout, or drop the directive to use the tagged release (`v0.5.0`).
+`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.5.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
 
 The repo vendors its dependencies (`vendor/`), so run `go mod tidy && go mod vendor` after any dependency change or the build fails with "inconsistent vendoring". `vendor/` is gitignored — it is a local build input, not committed state.
 
@@ -30,9 +30,9 @@ The repo vendors its dependencies (`vendor/`), so run `go mod tidy && go mod ven
 
 `ci.yml` (push to `master`/`main`, PRs, manual) runs a gofmt check over `cmd internal pkg`, `go vet`, `go test -race`, `make build`, and a container build that is not pushed. `release.yml` (on `v*` tags) builds the `darwin,linux` × `amd64,arm64` tarballs plus `checksums.txt` for a GitHub release, and pushes a `linux/amd64,linux/arm64` image to `ghcr.io/${{ github.repository }}` with `GITHUB_TOKEN` (semver + `latest` tags via `docker/metadata-action`).
 
-Two constraints shape both workflows:
+Two things to know about both workflows:
 
-- **The local `replace` cannot survive on a runner**, so every Go job starts with `go mod edit -dropreplace=github.com/imunhatep/awslib && go mod tidy`, resolving the version pinned in `require` from the module proxy. Consequence: an awslib change must be tagged and published before a release tag here will build against it. (Verified: dropping the replace changes nothing else in `go.mod`, and the tree builds and tests clean against the published `v0.5.0`.)
+- **They build the committed `go.mod` verbatim** — no `go mod edit`/`go mod tidy` fixups on the runner, so the module graph CI resolves is the one in the tree. Consequence: an awslib change must be tagged, published, *and* bumped in `require` here before a release tag will pick it up.
 - **The `Containerfile` builds with `-mod=vendor`** and `vendor/` is gitignored, so the image jobs run `go mod vendor` before `docker/build-push-action`. `.dockerignore` deliberately does *not* exclude `vendor/`.
 
 ## Architecture

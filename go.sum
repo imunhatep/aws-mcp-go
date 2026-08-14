@@ -116,6 +116,8 @@ github.com/google/jsonschema-go v0.4.2 h1:tmrUohrwoLZZS/P3x7ex0WAVknEkBZM46iALbc
 github.com/google/jsonschema-go v0.4.2/go.mod h1:r5quNTdLOYEz95Ru18zA0ydNbBuYoo9tgaYcxEYhJVE=
 github.com/google/uuid v1.6.0 h1:NIvaJDMOsjHA8n1jAhLSgzrAzy1Hgr+hNrb57e+94F0=
 github.com/google/uuid v1.6.0/go.mod h1:TIyPZe4MgqvfeYDBFedMoGGpEw/LqOeaOT+nhxU+yHo=
+github.com/imunhatep/awslib v0.5.0 h1:XM2+/g5TbCPmQeSPHkaDDyBnsGSBHHX83yiIgFAa0Vw=
+github.com/imunhatep/awslib v0.5.0/go.mod h1:aUxQ+v1YwElOKZklvayL0tG1zv+ohAQdz8faMZ5PgY0=
 github.com/imunhatep/gocollection v0.2.1 h1:hrrHrpLjspmZkQtxjacu7t8+mY/TSPjsPdoT3OdxsXc=
 github.com/imunhatep/gocollection v0.2.1/go.mod h1:fPmRT25eXp+nLCGIqyL3TmehsgK1oWNn00pv4sEVplo=
 github.com/kr/pretty v0.3.1 h1:flRD4NNwYAUpkphVc1HcthR4KEIFJ65n8Mw5qdRn3LE=

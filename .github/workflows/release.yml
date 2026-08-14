@@ -21,14 +21,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # See ci.yml: the local awslib `replace` is dropped so the tag pinned in
-      # `require` is resolved from the module proxy instead.
-      - name: Resolve awslib from its published tag
-        run: |
-          set -euo pipefail
-          go mod edit -dropreplace=github.com/imunhatep/awslib
-          go mod tidy
-
       - name: Vet
         run: go vet ./...
 
@@ -52,12 +44,6 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-
-      - name: Resolve awslib from its published tag
-        run: |
-          set -euo pipefail
-          go mod edit -dropreplace=github.com/imunhatep/awslib
-          go mod tidy
 
       - name: Build
         env:
@@ -111,12 +97,8 @@ jobs:
 
       # The Containerfile builds with `-mod=vendor`, so vendor/ must be present
       # in the build context; it is gitignored, so generate it here.
-      - name: Resolve awslib and vendor dependencies
-        run: |
-          set -euo pipefail
-          go mod edit -dropreplace=github.com/imunhatep/awslib
-          go mod tidy
-          go mod vendor
+      - name: Vendor dependencies
+        run: go mod vendor
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3

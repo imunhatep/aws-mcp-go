@@ -26,16 +26,6 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # go.mod carries `replace github.com/imunhatep/awslib => ../pkgs/awslib`
-      # for local development; that path does not exist on a runner. Drop it so
-      # the version pinned in `require` is fetched from the module proxy, and
-      # tidy to populate the go.sum entries the replace made unnecessary.
-      - name: Resolve awslib from its published tag
-        run: |
-          set -euo pipefail
-          go mod edit -dropreplace=github.com/imunhatep/awslib
-          go mod tidy
-
       - name: Check gofmt
         run: |
           set -euo pipefail
@@ -70,12 +60,8 @@ jobs:
       # The Containerfile builds with `-mod=vendor` (see below), so vendor/ has
       # to exist in the build context before the image build starts. vendor/ is
       # gitignored, so it is generated here rather than committed.
-      - name: Resolve awslib and vendor dependencies
-        run: |
-          set -euo pipefail
-          go mod edit -dropreplace=github.com/imunhatep/awslib
-          go mod tidy
-          go mod vendor
+      - name: Vendor dependencies
+        run: go mod vendor
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3

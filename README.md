@@ -322,14 +322,15 @@ organization's spend down from the payer.
 
 ## Development
 
-This module consumes `awslib` via a local `replace` directive
-(`replace github.com/imunhatep/awslib => ../pkgs/awslib`); adjust it to match
-your checkout, or drop it to use a tagged release.
+This module consumes `awslib` as a normal tagged dependency
+(`github.com/imunhatep/awslib v0.5.0`), resolved from the module proxy — no
+local checkout or `replace` directive is required to build. To test an unreleased
+`awslib` change, add a `replace` locally (`go mod edit -replace
+github.com/imunhatep/awslib=../pkgs/awslib`) and drop it again before committing.
 
 Dependencies are vendored — run `make tidy` (`go mod tidy && go mod vendor`)
 after any dependency change, or the build fails with "inconsistent vendoring".
-The container build reads `vendor/` too, since the `replace` target sits outside
-the build context.
+The container build reads `vendor/` too.
 
 | Target | What it does |
 |---|---|
@@ -352,12 +353,10 @@ Two GitHub Actions workflows live in `.github/workflows`:
 Release image tags come from `docker/metadata-action`: the full version, `major.minor`,
 `major`, plus `latest` for tags without a prerelease suffix.
 
-Both workflows start by dropping the local `awslib` `replace` directive
-(`go mod edit -dropreplace` + `go mod tidy`) so the version pinned in `require`
-is fetched from the module proxy — the `../pkgs/awslib` checkout only exists on
-a developer machine. `awslib` therefore has to be **tagged and pushed** before a
-release tag here can build. The image jobs then run `go mod vendor`, because
-`vendor/` is gitignored but the `Containerfile` builds with `-mod=vendor`.
+Both workflows build the committed `go.mod` as-is, so `awslib` has to be
+**tagged and pushed** — and the new version committed in `require` — before a
+release tag here can build against it. The image jobs run `go mod vendor` first,
+because `vendor/` is gitignored but the `Containerfile` builds with `-mod=vendor`.
 
 - **zerolog** for logging
 - **urfave/cli v3** for the CLI
