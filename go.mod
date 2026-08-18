@@ -6,6 +6,8 @@ require (
 	github.com/allegro/bigcache/v3 v3.1.0
 	github.com/aws/aws-sdk-go-v2 v1.43.3
 	github.com/aws/aws-sdk-go-v2/config v1.32.10
+	github.com/aws/aws-sdk-go-v2/credentials v1.19.10
+	github.com/aws/aws-sdk-go-v2/service/cloudfront v1.67.3
 	github.com/aws/aws-sdk-go-v2/service/configservice v1.61.1
 	github.com/aws/aws-sdk-go-v2/service/costexplorer v1.63.3
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.291.0
@@ -20,7 +22,6 @@ require (
 require (
 	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.5 // indirect
-	github.com/aws/aws-sdk-go-v2/credentials v1.19.10 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.18 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.34 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.34 // indirect
@@ -29,7 +30,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/autoscaling v1.64.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/batch v1.60.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/cloudcontrol v1.29.10 // indirect
-	github.com/aws/aws-sdk-go-v2/service/cloudfront v1.67.3 // indirect
 	github.com/aws/aws-sdk-go-v2/service/cloudtrail v1.55.6 // indirect
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.63.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/dynamodb v1.56.0 // indirect

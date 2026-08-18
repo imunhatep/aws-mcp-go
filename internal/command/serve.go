@@ -101,14 +101,23 @@ func (c ServeCommand) run(ctx context.Context, cmd *cli.Command) error {
 // AWS credential chain is missing or invalid. In assume-role mode this reports
 // the base principal that role assumption chains off of.
 func logCallerIdentity(ctx context.Context, builder *v3.ClientBuilder) error {
+	// Inspect whichever profile the default chain will land on, so an expired
+	// SSO login or an unusable credential_process is reported with the fix
+	// rather than as an opaque SDK error. A failure here is not fatal on its
+	// own: the chain may still resolve from env vars or IMDS.
+	auth, err := mcpserver.PreflightProfile(ctx, os.Getenv("AWS_PROFILE"))
+	if err != nil {
+		log.Warn().Err(err).Msg("[serve] aws profile preflight failed, continuing with the default credential chain")
+	}
+
 	client, err := builder.DefaultClient()
 	if err != nil {
-		return errors.Wrap(err, "resolving AWS credentials failed; check your AWS credential chain (profile / SSO / env / IMDS)")
+		return mcpserver.ExplainCredentialError(auth, errors.Wrap(err, "resolving AWS credentials failed; check your AWS credential chain (profile / SSO / env / IMDS)"))
 	}
 
 	id, err := client.GetCallerIdentity(ctx)
 	if err != nil {
-		return errors.Wrap(err, "STS GetCallerIdentity failed; AWS credentials are missing, expired or invalid")
+		return mcpserver.ExplainCredentialError(auth, errors.Wrap(err, "STS GetCallerIdentity failed; AWS credentials are missing, expired or invalid"))
 	}
 
 	log.Info().

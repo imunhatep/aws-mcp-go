@@ -12,8 +12,6 @@ import (
 	"github.com/imunhatep/awslib/provider"
 	ptypes "github.com/imunhatep/awslib/provider/types"
 	v3 "github.com/imunhatep/awslib/provider/v3"
-
-	"github.com/imunhatep/aws-mcp-go/pkg/errors"
 )
 
 // regionClientPool is the per-profile pool contract ProfilePool builds on.
@@ -45,6 +43,15 @@ func NewProfilePool(ctx context.Context, profiles []string) (*ProfilePool, error
 	entries := make([]profileEntry, 0, len(profiles))
 
 	for _, name := range profiles {
+		// Parse the profile's config first: this catches an undefined profile,
+		// a missing or expired SSO login and a read-only token cache with an
+		// actionable message, instead of an opaque SDK error on the STS call
+		// below.
+		auth, err := PreflightProfile(ctx, name)
+		if err != nil {
+			return nil, err
+		}
+
 		// Build the credential chain from the named profile only. Note this
 		// deliberately does not go through v3.DefaultAwsClientProviders: that
 		// helper folds in ambient AWS_ACCESS_KEY_ID / AWS_PROFILE env
@@ -62,12 +69,12 @@ func NewProfilePool(ctx context.Context, profiles []string) (*ProfilePool, error
 
 		client, err := builder.DefaultClient()
 		if err != nil {
-			return nil, errors.Wrapf(err, "aws profile %q: resolving credentials failed; check the profile in ~/.aws/config (sso login expired?)", name)
+			return nil, ExplainCredentialError(auth, err)
 		}
 
 		id, err := client.GetCallerIdentity(ctx)
 		if err != nil {
-			return nil, errors.Wrapf(err, "aws profile %q: STS GetCallerIdentity failed; credentials are missing, expired or invalid", name)
+			return nil, ExplainCredentialError(auth, err)
 		}
 
 		log.Info().

@@ -38,17 +38,36 @@ Tagged releases publish a `linux/amd64,linux/arm64` manifest to GHCR (see
 podman pull ghcr.io/imunhatep/aws-mcp-go:latest
 ```
 
-Run it with the host's AWS config and SSO cache mounted read-only (the image
-sets `HOME=/home/nonroot`, so that path is where the credential chain looks):
+The recommended setup is **native AWS SSO** (`sso_session` profiles). Nothing
+needs to run inside the container: the SDK reads the token the host wrote and
+refreshes it on its own. Log in on the host first, then mount the config and the
+token cache (the image sets `HOME=/home/nonroot`, so that path is where the
+credential chain looks):
 
 ```sh
+aws sso login --sso-session my-session        # on the host, once
+
 podman run --rm -d \
   --name aws-mcp \
-  -e AWS_PROFILE \
-  -e AWS_REGION \
-  -v ~/.aws:/home/nonroot/.aws:ro \
-  -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:latest
+  -v ~/.aws/config:/home/nonroot/.aws/config:ro \
+  -v ~/.aws/sso/cache:/home/nonroot/.aws/sso/cache:rw \
+  -p 127.0.0.1:3040:3040 \
+  ghcr.io/imunhatep/aws-mcp-go:latest serve --profiles dev,prod
 ```
+
+Two details that decide whether this keeps working past the first few hours:
+
+- **The token cache must be mounted read-write.** On refresh the SDK writes a
+  temp file into the cache directory and renames it over the token, so a `:ro`
+  mount works until the token expires and then fails every call. Startup warns
+  when the directory is not writable.
+- **Mount `config` and `sso/cache` separately** rather than all of `~/.aws`, so
+  the container never sees `~/.aws/credentials`. The image runs as uid 65532;
+  if the cache mount is not writable for it, add
+  `--userns=keep-id:uid=65532,gid=65532`.
+
+Only a browser login is ever manual. Afterwards the container refreshes silently
+until the SSO session reaches its maximum duration.
 
 Static or role credentials from the current shell instead, in cross-account
 mode:
@@ -60,11 +79,12 @@ podman run --rm -p 127.0.0.1:3040:3040 \
 ```
 
 > The runtime image is distroless and has **no shell**, so a mounted profile
-> that resolves credentials through `credential_process` fails at startup with
-> `error in credential_process: exec: "sh": executable file not found`. SSO and
-> static profiles read from `~/.aws` directly and work as mounted; for
-> `credential_process` profiles, resolve them on the host and hand the result
-> to the container as environment variables:
+> that resolves credentials through `credential_process` (aws-sso-cli,
+> aws-vault, …) fails at startup with `error in credential_process: exec: "sh":
+> executable file not found`. Startup warns as soon as it sees such a profile.
+> Converting those profiles to native `sso_session` is the durable fix; as a
+> stopgap, resolve them on the host and hand the result to the container as
+> environment variables:
 >
 > ```sh
 > # bash/zsh
@@ -88,7 +108,8 @@ write to it:
 ```sh
 podman run --rm -d --name aws-mcp \
   -e AWS_PROFILE -e MCP_CACHE_DIR=/cache -e MCP_CACHE_TTL=6h \
-  -v ~/.aws:/home/nonroot/.aws:ro \
+  -v ~/.aws/config:/home/nonroot/.aws/config:ro \
+  -v ~/.aws/sso/cache:/home/nonroot/.aws/sso/cache:rw \
   -v aws-mcp-cache:/cache:U \
   -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:latest
 ```
@@ -153,6 +174,36 @@ Notes:
 - If two profiles point at the same account, the duplicate `(account, region)`
   pair is dropped so results are not counted twice.
 - `--profiles` cannot be combined with `--assume-role` / `--assume-role-arns`.
+
+### Startup credential checks
+
+Before any AWS call, each profile's shared config is parsed and checked, so
+credential problems are reported with the fix instead of surfacing later as an
+opaque SDK error on the first tool call. The checks are pure config/file reads —
+no AWS request is made:
+
+| Condition | Result |
+|-----------|--------|
+| Profile not defined in `~/.aws/config` | abort, naming the profile |
+| SSO profile with no cached token | abort with `run: aws sso login --sso-session <name>` |
+| SSO token expired | abort, showing the expiry and the same login command |
+| SSO token cache unreadable / no `expiresAt` | abort, pointing at the cache file |
+| SSO token cache directory not writable | warn — refresh will fail later (see the container notes) |
+| SSO token expiring within 30 minutes | warn, with the remaining validity |
+| Legacy SSO profile (`sso_start_url`, no `sso_session`) | warn — the SDK cannot refresh it |
+| `credential_process` profile | warn — needs that binary on PATH, unavailable in the distroless image |
+
+A healthy start logs the token lifetime, so it is visible up front how long the
+server can run unattended:
+
+```
+INF [mcpserver.PreflightProfile] sso token cached profile=dev sso_session=my-session token_valid_for=7h58m0s
+INF [ProfilePool] profile resolved profile=dev account=111111111111 arn=arn:aws:sts::111111111111:assumed-role/…
+```
+
+Errors that do slip through to the SDK are translated the same way — an expired
+session, an undefined profile, an unrunnable `credential_process` and expired
+static credentials each get a message naming the profile and the fix.
 
 ### Assume-role mode — cross-account
 

@@ -55,6 +55,7 @@ The modes are mutually exclusive — `config.Validate` rejects `--profiles` comb
 
 **`ProfilePool` specifics.** One `v3.ClientBuilder` + `provider.ClientPool` per profile. It deliberately does *not* use `v3.DefaultAwsClientProviders`: that helper folds ambient `AWS_ACCESS_KEY_ID` / `AWS_PROFILE` env credentials into the config, and a static credentials provider beats `WithSharedConfigProfile`, which would collapse every profile onto the same identity. So it builds the retry options plus `WithSharedConfigProfile` itself. Two invariants worth keeping:
 
+- **Preflight before AWS** — `PreflightProfile` (`credcheck.go`) parses the profile's shared config first, so an undefined profile, a missing/expired/malformed SSO token or an unrunnable `credential_process` aborts with an actionable message before a client is built.
 - **Eager identity, lazy regions** — the constructor does one STS `GetCallerIdentity` per profile (fails fast on expired SSO, and caches the account ID so `ListAccountIDs` answers before any region client exists); region clients are still created on demand by the inner pools.
 - **Dedupe by `(accountID, region)`** in `GetClients` — two profiles can point at the same account, and `fetchResources` fans out over every client without deduplicating, so duplicates would double rows and inflate counts. A profile that fails for a region is logged and skipped, not fatal.
 
@@ -91,6 +92,17 @@ Cost Explorer is a billing API, not an inventory one, so it bypasses the resourc
 `SupportedResourceTypes()` in `resource.go` is a hand-maintained allowlist that **must mirror awslib's `proxy.RepoProxy.FindAll` dispatch switch**. Types in awslib's registry but not wired into `FindAll` (e.g. Athena, CloudTrail) are deliberately omitted so callers never hit a "resource type not supported" error. When awslib adds/removes a `FindAll` case, update this list. `ResolveResourceType` accepts both canonical (`AWS::EC2::Instance`, case-insensitive) and URL (`aws_ec2_instance`) forms.
 
 CloudFront is present only as its SaaS Manager types — `AWS::CloudFront::DistributionTenantSummary` and `AWS::CloudFront::ConnectionGroup`. The full `AWS::CloudFront::DistributionTenant` is a per-identifier Get, not a list, so it stays out of the allowlist; classic **distributions are not listable at all** because awslib has no `ListDistributions` — exposing them needs an upstream repository method, resource type and `FindAll` case first. Both CloudFront types are in `cfg.ResourceTypeListGlobal()`, and awslib's `RepoProxyPool.List` already collapses global types to one proxy per account, so "all regions" does not fan out or duplicate rows.
+
+### Credential preflight (`credcheck.go`)
+
+AWS credential failures surface from the SDK as long, causeless strings, and in this server they surface on the *first tool call* rather than at startup. `credcheck.go` closes both gaps, using only local file reads:
+
+- `InspectProfile` reads a profile via `awsconfig.LoadSharedConfigProfile`. That function does **not** honour `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` on its own (unlike `LoadDefaultConfig`), so the overrides are read from `awsconfig.NewEnvConfig()` and passed in — otherwise the preflight would inspect different files than the credential chain does.
+- `CheckSSOToken` locates the cached token with the SDK's own `ssocreds.StandardCachedTokenFilepath` (sha1 of the `sso_session` name, or of the start URL for legacy profiles) and reads only `expiresAt` out of it — the file holds live credentials.
+- The **writability check is on the directory, not the file**: `ssocreds.storeCachedToken` writes `<token>.tmp-<nanos>` alongside the token and renames it, so a read-only `~/.aws/sso/cache` mount fails at the first refresh, hours after a healthy-looking startup.
+- `PreflightProfile` decides warn vs abort (see the README table); `ExplainCredentialError` wraps SDK errors that still get through. Both are called from `NewProfilePool` and from `logCallerIdentity` in `serve.go`, so all three auth modes get the same treatment.
+
+Native `sso_session` profiles need no code beyond this — the SDK resolves and refreshes them. `credential_process` profiles cannot work in the distroless image (no shell), which is why they are warned about explicitly.
 
 ### Cache
 
