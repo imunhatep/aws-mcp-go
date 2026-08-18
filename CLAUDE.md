@@ -100,7 +100,7 @@ AWS credential failures surface from the SDK as long, causeless strings, and in 
 - `InspectProfile` reads a profile via `awsconfig.LoadSharedConfigProfile`. That function does **not** honour `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` on its own (unlike `LoadDefaultConfig`), so the overrides are read from `awsconfig.NewEnvConfig()` and passed in — otherwise the preflight would inspect different files than the credential chain does.
 - `CheckSSOToken` locates the cached token with the SDK's own `ssocreds.StandardCachedTokenFilepath` (sha1 of the `sso_session` name, or of the start URL for legacy profiles) and reads only `expiresAt` out of it — the file holds live credentials.
 - The **writability check is on the directory, not the file**: `ssocreds.storeCachedToken` writes `<token>.tmp-<nanos>` alongside the token and renames it, so a read-only `~/.aws/sso/cache` mount fails at the first refresh, hours after a healthy-looking startup.
-- `PreflightProfile` decides warn vs abort (see the README table); `ExplainCredentialError` wraps SDK errors that still get through. Both are called from `NewProfilePool` and from `logCallerIdentity` in `serve.go`, so all three auth modes get the same treatment.
+- `PreflightProfile` decides warn vs abort (the table is in `docs/authentication.md`); `ExplainCredentialError` wraps SDK errors that still get through. Both are called from `NewProfilePool` and from `logCallerIdentity` in `serve.go`, so all three auth modes get the same treatment.
 
 Native `sso_session` profiles need no code beyond this — the SDK resolves and refreshes them. `credential_process` profiles cannot work in the distroless image (no shell), which is why they are warned about explicitly.
 
@@ -113,7 +113,7 @@ Native `sso_session` profiles need no code beyond this — the SDK resolves and 
 - **Errors:** use this module's own `pkg/errors` (dependency-free, adds stack traces via `WithStack`/`Errorf`), not the stdlib `errors` or `pkg/errors` upstream.
 - **Logging:** `zerolog`, message prefix convention `[pkg.Func] ...`.
 - **Tools return errors as results:** handlers return `mcp.NewToolResultErrorFromErr/Errorf(...)` with a `nil` Go error for user-facing failures (bad input, AWS init failure) — reserve a non-nil Go error for transport-level faults.
-- Go 1.26 toolchain (`go.mod`); the README notes a hard Go 1.25+ floor from the `mcp-go` dependency.
+- Go 1.26 toolchain (`go.mod`); `docs/development.md` notes a hard Go 1.25+ floor from the `mcp-go` dependency.
 
 ## Testing
 

@@ -67,9 +67,12 @@ jobs:
           set -euo pipefail
           [ -f README.md ] && cp README.md dist/
           [ -f LICENSE ] && cp LICENSE dist/
+          # README links into docs/, so ship it too or the tarball's links dangle.
+          [ -d docs ] && cp -R docs dist/
           FILES=(aws-mcp)
           [ -f dist/README.md ] && FILES+=(README.md)
           [ -f dist/LICENSE ] && FILES+=(LICENSE)
+          [ -d dist/docs ] && FILES+=(docs)
           tar -czf "aws-mcp_${VERSION}_${GOOS}_${GOARCH}.tar.gz" -C dist "${FILES[@]}"
 
       - name: Upload artifact

@@ -1,443 +1,83 @@
 # aws-mcp
 
-An [MCP](https://modelcontextprotocol.io) server (streamable-HTTP transport) that
-lists AWS resources across accounts and regions and queries AWS Cost Explorer,
-built on top of [`awslib`](https://github.com/imunhatep/awslib)'s
-resource-fetching and cost pipelines. Results are cached (default **6 hours**).
+An [MCP](https://modelcontextprotocol.io) server that lets an AI assistant answer
+questions about your AWS estate — inventory across every account and region, and
+what it all costs — without handing it a shell or write access.
 
-`awslib` remains a dedicated AWS library; this repository is only the MCP server
-that consumes it.
+```
+"How many running m5 instances do we have in prod?"
+"Which team tag spent the most on RDS last month?"
+"List the EKS clusters across all accounts with their versions."
+```
 
-## Build & run
+**Why it exists.** Pointing an assistant at the `aws` CLI is slow, expensive in
+tokens and unbounded in blast radius. This server instead exposes a small set of
+read-only tools that do the fan-out server-side and return *answers*:
+`count_resources` aggregates without shipping rows, filters and views cut
+payloads to what was asked for, everything is cached (default 6h), and Cost
+Explorer queries are validated before they are billed. It is read-only by
+construction — no tool mutates anything.
+
+It is a thin MCP layer over [`awslib`](https://github.com/imunhatep/awslib),
+which does the actual AWS work.
+
+## Quick start
 
 ```sh
 make build
-./bin/aws-mcp serve --addr :3040
+aws sso login --sso-session my-session
+./bin/aws-mcp serve --profiles dev,prod
 ```
 
-The `serve` command listens on `--addr` and serves the MCP endpoint over the
-streamable-HTTP transport at:
-
-- `/mcp` — MCP streamable-HTTP endpoint (POST for JSON-RPC requests, GET for the SSE stream). Connect your client here.
-
-### Container
-
-The image compiles from the vendored dependency tree, so `make image` runs
-`go mod vendor` first — the local `awslib` checkout is needed on the host, not
-inside the image.
+Or with a container — mount the AWS config and SSO token cache, no credentials
+baked in:
 
 ```sh
-make image                  # -> ghcr.io/imunhatep/aws-mcp-go:latest
-make image VERSION=v0.1.0   # -> ghcr.io/imunhatep/aws-mcp-go:v0.1.0
-```
-
-Tagged releases publish a `linux/amd64,linux/arm64` manifest to GHCR (see
-[CI & releases](#ci--releases)), so a prebuilt image can be pulled instead:
-
-```sh
-podman pull ghcr.io/imunhatep/aws-mcp-go:latest
-```
-
-The recommended setup is **native AWS SSO** (`sso_session` profiles). Nothing
-needs to run inside the container: the SDK reads the token the host wrote and
-refreshes it on its own. Log in on the host first, then mount the config and the
-token cache (the image sets `HOME=/home/nonroot`, so that path is where the
-credential chain looks):
-
-```sh
-aws sso login --sso-session my-session        # on the host, once
-
-podman run --rm -d \
-  --name aws-mcp \
+podman run --rm -d --name aws-mcp \
   -v ~/.aws/config:/home/nonroot/.aws/config:ro \
   -v ~/.aws/sso/cache:/home/nonroot/.aws/sso/cache:rw \
   -p 127.0.0.1:3040:3040 \
   ghcr.io/imunhatep/aws-mcp-go:latest serve --profiles dev,prod
 ```
 
-Two details that decide whether this keeps working past the first few hours:
-
-- **The token cache must be mounted read-write.** On refresh the SDK writes a
-  temp file into the cache directory and renames it over the token, so a `:ro`
-  mount works until the token expires and then fails every call. Startup warns
-  when the directory is not writable.
-- **Mount `config` and `sso/cache` separately** rather than all of `~/.aws`, so
-  the container never sees `~/.aws/credentials`. The image runs as uid 65532;
-  if the cache mount is not writable for it, add
-  `--userns=keep-id:uid=65532,gid=65532`.
-
-Only a browser login is ever manual. Afterwards the container refreshes silently
-until the SSO session reaches its maximum duration.
-
-Static or role credentials from the current shell instead, in cross-account
-mode:
-
-```sh
-podman run --rm -p 127.0.0.1:3040:3040 \
-  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION \
-  ghcr.io/imunhatep/aws-mcp-go:latest serve --assume-role
-```
-
-> The runtime image is distroless and has **no shell**, so a mounted profile
-> that resolves credentials through `credential_process` (aws-sso-cli,
-> aws-vault, …) fails at startup with `error in credential_process: exec: "sh":
-> executable file not found`. Startup warns as soon as it sees such a profile.
-> Converting those profiles to native `sso_session` is the durable fix; as a
-> stopgap, resolve them on the host and hand the result to the container as
-> environment variables:
->
-> ```sh
-> # bash/zsh
-> eval "$(aws configure export-credentials --format env)"
-> ```
-> ```fish
-> # fish
-> aws configure export-credentials --format env-no-export \
->   | while read -l l; set -x (string split -m1 -- = $l); end
-> ```
->
-> then run the container with `-e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY
-> -e AWS_SESSION_TOKEN` as above. These are short-lived; re-export when they
-> expire.
-
-By default the on-disk cache lands in the container's `/tmp` and is lost when it
-exits. To keep it across restarts, mount a volume and point `MCP_CACHE_DIR` at
-it — `:U` chowns the volume to the image's non-root user, which otherwise cannot
-write to it:
-
-```sh
-podman run --rm -d --name aws-mcp \
-  -e AWS_PROFILE -e MCP_CACHE_DIR=/cache -e MCP_CACHE_TTL=6h \
-  -v ~/.aws/config:/home/nonroot/.aws/config:ro \
-  -v ~/.aws/sso/cache:/home/nonroot/.aws/sso/cache:rw \
-  -v aws-mcp-cache:/cache:U \
-  -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:latest
-```
-
-Multi-arch manifest (override `IMAGE` to tag for a different registry):
-
-```sh
-make image-multiarch VERSION=v0.1.0
-```
-
-### Claude Code
+Then point your client at it:
 
 ```sh
 claude mcp add --transport http aws http://127.0.0.1:3040/mcp
 ```
 
-## Commands
-
-| Command | Description |
-|---------|-------------|
-| `serve` | Run the MCP server (streamable HTTP, served at `/mcp`) |
-| `version` | Print version and commit |
-
-## Authentication
-
-The server uses the standard AWS credential chain, so it works with anything
-`aws-sdk-go-v2` understands. Three mutually exclusive modes:
-
-### Local mode (default) — AWS profile / SSO / env
-
-Single account, using whatever credentials the default chain resolves
-(`~/.aws/config` SSO sessions, `AWS_PROFILE`, static env vars, IMDS, …):
-
-```sh
-aws sso login --profile my-sso-profile
-AWS_PROFILE=my-sso-profile ./bin/aws-mcp serve
-```
-
-### Multi-profile mode — one account per profile
-
-Serves several AWS shared-config profiles from a single process, each as its own
-account. Useful when the accounts are reachable as separate profiles (SSO,
-static keys, `credential_process`) rather than through assumable roles:
-
-```sh
-aws sso login --profile dev
-aws sso login --profile prod
-./bin/aws-mcp serve --profiles dev,prod
-```
-
-Every tool then spans all profiles: `list_accounts` reports each account,
-`list_resources` / `count_resources` fan out across them, and the Cost Explorer
-tools return per-account groups.
-
-Notes:
-
-- Each profile's identity is resolved with one STS call at startup, so a missing
-  or expired profile aborts the server with the profile named in the error.
-  Region clients are still created lazily on first use.
-- Only the named profile's credentials are used — ambient `AWS_PROFILE` /
-  `AWS_ACCESS_KEY_ID` env vars do not override them.
-- If two profiles point at the same account, the duplicate `(account, region)`
-  pair is dropped so results are not counted twice.
-- `--profiles` cannot be combined with `--assume-role` / `--assume-role-arns`.
-
-### Startup credential checks
-
-Before any AWS call, each profile's shared config is parsed and checked, so
-credential problems are reported with the fix instead of surfacing later as an
-opaque SDK error on the first tool call. The checks are pure config/file reads —
-no AWS request is made:
-
-| Condition | Result |
-|-----------|--------|
-| Profile not defined in `~/.aws/config` | abort, naming the profile |
-| SSO profile with no cached token | abort with `run: aws sso login --sso-session <name>` |
-| SSO token expired | abort, showing the expiry and the same login command |
-| SSO token cache unreadable / no `expiresAt` | abort, pointing at the cache file |
-| SSO token cache directory not writable | warn — refresh will fail later (see the container notes) |
-| SSO token expiring within 30 minutes | warn, with the remaining validity |
-| Legacy SSO profile (`sso_start_url`, no `sso_session`) | warn — the SDK cannot refresh it |
-| `credential_process` profile | warn — needs that binary on PATH, unavailable in the distroless image |
-
-A healthy start logs the token lifetime, so it is visible up front how long the
-server can run unattended:
-
-```
-INF [mcpserver.PreflightProfile] sso token cached profile=dev sso_session=my-session token_valid_for=7h58m0s
-INF [ProfilePool] profile resolved profile=dev account=111111111111 arn=arn:aws:sts::111111111111:assumed-role/…
-```
-
-Errors that do slip through to the SDK are translated the same way — an expired
-session, an undefined profile, an unrunnable `credential_process` and expired
-static credentials each get a message naming the profile and the fix.
-
-### Assume-role mode — cross-account
-
-Assumes IAM roles in other accounts, chaining off the base credentials' STS.
-
-- **Auto-discover** the assumable roles from the current IAM role's attached policies (`sts:AssumeRole` resources):
-
-  ```sh
-  ./bin/aws-mcp serve --assume-role
-  ```
-
-- **Explicit** roles (comma-separated; `accountID=roleArn` or a bare role ARN):
-
-  ```sh
-  ./bin/aws-mcp serve --assume-role-arns 'arn:aws:iam::111111111111:role/reader,arn:aws:iam::222222222222:role/reader'
-  ```
-
-  Providing `--assume-role-arns` implies assume-role mode and overrides auto-discovery.
-
-## Flags (`serve`)
-
-| Flag | Env | Default | Description |
-|------|-----|---------|-------------|
-| `--addr` | `MCP_ADDR` | `:3040` | Listen address (MCP served at `/mcp`) |
-| `--cache-ttl` | `MCP_CACHE_TTL` | `6h` | TTL for cached resource listings (e.g. `6h`, `30m`) |
-| `--cache-dir` | `MCP_CACHE_DIR` | OS temp dir | On-disk cache directory; empty = in-memory only |
-| `--no-cache` | | `false` | Disable caching entirely |
-| `--profiles` | `MCP_AWS_PROFILES` | | Comma-separated AWS shared-config profiles to serve, one account each (excludes the assume-role flags) |
-| `--assume-role` | | `false` | Auto-discover assumable roles from the current IAM role |
-| `--assume-role-arns` | `MCP_ASSUME_ROLE_ARNS` | | Explicit assumable role ARNs (implies assume-role mode) |
-| `--verbose` / `-v` | `AWS_MCP_VERBOSE`, `LOG_LEVEL` | `3` | Log verbosity: `0`=fatal … `5`=trace (global flag) |
-
-## Tools
-
-| Tool | Arguments | Description |
-|------|-----------|-------------|
-| `list_resource_types` | — | Supported resource types (canonical + URL form, global flag) |
-| `list_regions` | — | Known AWS regions with descriptions |
-| `list_accounts` | — | Account IDs the server can reach |
-| `list_resources` | `resource_type` (required), `region`, `account_id`, `view`, `state`, `tag`, `attribute`, `limit`, `cursor` | List resources of a type across accounts/regions (paginated) |
-| `count_resources` | `resource_type` (required), `group_by`, `region`, `account_id`, `state`, `tag`, `attribute` | Aggregate resources into group counts |
-| `get_cost_and_usage` | `period`, `start`, `end`, `granularity`, `metrics`, `group_by`, `filters`, `account_id`, `limit`, `include_periods` | Actual spend/usage, filtered and grouped |
-| `get_cost_forecast` | `period`, `start`, `end`, `granularity`, `metric`, `filters`, `account_id`, `prediction_interval_level` | Forecast future spend |
-| `list_cost_dimension_values` | `dimension` (required), `period`, `start`, `end`, `search`, `filters`, `context`, `account_id`, `limit` | Values a cost dimension actually took |
-| `list_cost_dimensions` | — | The cost query vocabulary (dimensions, metrics, periods, filter shape) |
-
-`resource_type` accepts either the canonical form (`AWS::EC2::Instance`) or the
-URL form (`aws_ec2_instance`). When `region` is omitted, all known regions are
-queried (global resource types are fetched from a single region automatically).
-
-### `list_resources` — views, filters, pagination
-
-The response is a paginated envelope: `{ "items": [...], "count": N, "total": M,
-"next_cursor": "…" }`. `count` is the rows on this page, `total` the count after
-filtering, and `next_cursor` is present only when more rows remain (pass it back
-as `cursor` for the next page). `limit` defaults to 50 (max 1000).
-
-`view` controls how much each row carries, trading size for richness:
-
-| `view` | Fields per row |
-|--------|----------------|
-| `id` (default) | `account_id`, `region`, `type`, `arn`, `id`, `name`, `state`, `created_at` |
-| `summary` | + `tags` and a curated `attributes` object |
-| `detail` | + `raw`, the full provider-native entity (every field) |
-
-The curated `attributes` surface the most relevant provider-native fields per
-type — an EC2 instance yields `instance_type`, `instance_family`, `state`,
-`private_ip`; RDS yields `engine`, `instance_class`, `status`, `endpoint`; a load
-balancer yields `lb_type`, `scheme`, `dns_name`, `state`. Curated types include
-EC2 (instance/volume/snapshot/vpc), RDS (instance/snapshot), ELBv2, ECS
-(cluster/service), EKS, Lambda, DynamoDB, S3, Route53, Secrets Manager, EFS, SQS,
-SNS, IAM users, Auto Scaling groups and CloudFront (distribution tenants /
-connection groups).
-
-Filters narrow results server-side (so payload scales with the answer, not the
-inventory): `state` (case-insensitive lifecycle match, e.g. `running`), `tag`
-(`Key=Value`), and `attribute` (`key=value` against a curated attribute, e.g.
-`instance_type=m5.2xlarge`).
-
-```jsonc
-// list_resources: running m5.2xlarge instances, thin view
-{ "resource_type": "AWS::EC2::Instance", "region": "eu-central-1",
-  "state": "running", "attribute": "instance_type=m5.2xlarge" }
-```
-
-### `count_resources` — aggregates without listing
-
-For "how many / break down by" questions, `count_resources` returns
-`{ "total": N, "group_by": [...], "buckets": [{ "group": {...}, "count": N }] }`
-(sorted by descending count) instead of every row — kilobytes instead of
-megabytes. `group_by` is a comma-separated list of `type`, `state`, `region`,
-`account_id`, `tag:<key>` or `attr:<key>` (defaults to `state`). It accepts the
-same `state`/`tag`/`attribute` filters.
-
-```jsonc
-// count_resources: running instances grouped by type
-{ "resource_type": "AWS::EC2::Instance", "region": "eu-central-1",
-  "state": "running", "group_by": "attr:instance_type" }
-```
-
-## Cost Explorer
-
-`get_cost_and_usage` is the console's cost report as a tool: a time window, a
-granularity, cost metrics, filter rows and up to **2** groupings. Call
-`list_cost_dimensions` for the full vocabulary and `list_cost_dimension_values`
-to discover the exact strings a filter needs — AWS service names (`Amazon
-Elastic Compute Cloud - Compute`) rarely match what a caller would guess.
-
-**Time window.** Either a named `period` or an explicit `start`/`end` pair
-(`YYYY-MM-DD`, end exclusive). Named periods beginning `last_` cover whole
-elapsed units and stop at today, so their numbers are stable; `this_month`
-(`mtd`), `this_year` (`ytd`) and `today` run through today, whose costs are still
-partial.
-
-| | |
-|---|---|
-| Days | `today`, `yesterday`, `last_7_days`, `last_30_days`, `last_<n>_days` |
-| Months | `this_month` / `mtd`, `last_month`, `last_3_months`, `last_<n>_months` |
-| Years | `this_year` / `ytd`, `last_year` |
-| Forecast | `this_month`, `next_month`, `next_<n>_days`, `next_<n>_months` |
-
-`granularity` defaults to `MONTHLY` (`DAILY`, `HOURLY`); `metrics` defaults to
-`UnblendedCost` (also `AmortizedCost`, `BlendedCost`, `NetUnblendedCost`,
-`NetAmortizedCost`, `UsageQuantity`, `NormalizedUsageAmount`). The first metric
-ranks the groups.
-
-**Grouping.** `group_by` takes up to two entries: a dimension (`SERVICE`,
-`LINKED_ACCOUNT`, `REGION`, `INSTANCE_TYPE`, `USAGE_TYPE`, `RECORD_TYPE`,
-`PURCHASE_TYPE`, `OPERATION`, …, case-insensitive with aliases like `account`
-and `charge_type`), `TAG:<key>` or `COST_CATEGORY:<key>`. Grouped tag values come
-back unwrapped from the API's `<key>$<value>` encoding, with untagged spend
-labelled `(not set)`.
-
-**Filtering.** `filters` is a list of rows, AND-ed together, with the values
-inside a row OR-ed — the console's filter panel:
-
-```jsonc
-{ "type": "dimension" | "tag" | "cost_category",  // optional; inferred from key
-  "key": "SERVICE",                               // dimension, tag key or category
-  "values": ["…"],
-  "match_options": ["EQUALS"],                    // EQUALS / CASE_SENSITIVE, ABSENT on tags
-  "exclude": false,                               // the console's "Exclude" toggle
-  "absent": false,                                // key not carried at all
-  "present": false }                              // key carried, any value
-```
-
-**Response.** `groups` aggregates the whole window ranked by spend (for "what
-costs the most"), `periods` splits the same data by time (for trends), and
-`total` sums it. `limit` caps the group list (default 25) with `group_count` /
-`groups_truncated` reporting what was dropped; `include_periods` adds the
-per-period group breakdown, which is off by default to keep responses small.
-
-```jsonc
-// Top RDS spenders by team tag last month, excluding credits and refunds
-{ "period": "last_month", "group_by": ["TAG:Team"], "limit": 10,
-  "filters": [{ "key": "SERVICE", "values": ["Amazon Relational Database Service"] },
-              { "key": "RECORD_TYPE", "values": ["Credit", "Refund"], "exclude": true }] }
-
-// Daily EC2 spend per region over the last 30 days, with the per-period breakdown
-{ "period": "last_30_days", "granularity": "DAILY", "include_periods": true,
-  "group_by": ["SERVICE", "REGION"] }
-```
-
-By default every reachable account is queried and the results summed, with each
-group attributed by `account_id` and a `note` on the response. If the pool holds
-both a management (payer) account and its members their costs overlap — pass
-`account_id` to scope to one, or `group_by: ["LINKED_ACCOUNT"]` to break an
-organization's spend down from the payer.
-
-> Cost Explorer bills **$0.01 per request**. Arguments are validated before any
-> call is made, and answers are cached like resource listings.
-
-## Example MCP client config
-
-```json
-{
-  "mcpServers": {
-    "aws": {
-      "url": "http://localhost:3040/mcp"
-    }
-  }
-}
-```
-
-## Notes
-
-- On startup `serve` resolves the base credentials' STS caller identity and logs
-  the account, ARN, user ID and region. If the credential chain is missing,
-  expired or invalid, startup aborts immediately with a clear error rather than
-  failing on the first tool call. In assume-role mode this reports the base
-  principal that role assumption chains off of.
-- Requires **Go 1.25+** (a floor introduced by the `github.com/mark3labs/mcp-go` dependency).
-- On the first `list_resources` call without a `region`, the server initializes
-  a client per region (one STS `GetCallerIdentity` each), which is slower; clients
-  and results are cached afterwards. Pass a specific `region` for fast, targeted queries.
-
-## Development
-
-This module consumes `awslib` as a normal tagged dependency
-(`github.com/imunhatep/awslib v0.5.0`), resolved from the module proxy — no
-local checkout or `replace` directive is required to build. To test an unreleased
-`awslib` change, add a `replace` locally (`go mod edit -replace
-github.com/imunhatep/awslib=../pkgs/awslib`) and drop it again before committing.
-
-Dependencies are vendored — run `make tidy` (`go mod tidy && go mod vendor`)
-after any dependency change, or the build fails with "inconsistent vendoring".
-The container build reads `vendor/` too.
-
-| Target | What it does |
-|---|---|
-| `make build` | Build `bin/aws-mcp` with version/commit ldflags |
-| `make test` | `go test ./...` |
-| `make tidy` | `go mod tidy && go mod vendor` |
-| `make run` | Build, then `serve` |
-| `make image` | Vendor, then build `$(IMAGE):$(VERSION)` (defaults to `ghcr.io/imunhatep/aws-mcp-go:latest`) with podman |
-| `make image-multiarch` | Same as a `linux/amd64,linux/arm64` manifest |
-
-### CI & releases
-
-Two GitHub Actions workflows live in `.github/workflows`:
-
-| Workflow | Trigger | What it produces |
-|---|---|---|
-| `ci.yml` | push to `master`/`main`, PRs, manual | gofmt/vet gates, `go test -race`, `make build`, and a container build (not pushed) |
-| `release.yml` | push of a `v*` tag | `darwin,linux` × `amd64,arm64` binary tarballs + `checksums.txt` on a GitHub release, and a multi-arch image pushed to `ghcr.io/imunhatep/aws-mcp-go` |
-
-Release image tags come from `docker/metadata-action`: the full version, `major.minor`,
-`major`, plus `latest` for tags without a prerelease suffix.
-
-Both workflows build the committed `go.mod` as-is, so `awslib` has to be
-**tagged and pushed** — and the new version committed in `require` — before a
-release tag here can build against it. The image jobs run `go mod vendor` first,
-because `vendor/` is gitignored but the `Containerfile` builds with `-mod=vendor`.
-
-- **zerolog** for logging
-- **urfave/cli v3** for the CLI
-- **`pkg/errors`** (this module's own dependency-free package) for error wrapping
+Startup validates every profile before serving, so a missing or expired SSO
+login fails immediately with the command that fixes it — not on the first
+question you ask.
+
+## What it exposes
+
+| Tool | Answers |
+|------|---------|
+| `list_resources` | "Show me the …" — paginated rows, three levels of detail, server-side filters |
+| `count_resources` | "How many / break down by …" — grouped counts, no rows shipped |
+| `list_accounts`, `list_regions`, `list_resource_types` | What this server can reach |
+| `get_cost_and_usage` | "What did we spend on …" — grouped, filtered, multi-account |
+| `get_cost_forecast` | "What will we spend …" |
+| `list_cost_dimensions`, `list_cost_dimension_values` | The cost vocabulary, and the exact strings filters need |
+
+Coverage spans EC2, RDS, ELB, ECS, EKS, Lambda, DynamoDB, S3, Route53, Secrets
+Manager, EFS, SQS, SNS, IAM, Auto Scaling and CloudFront — call
+`list_resource_types` for the current list.
+
+## Documentation
+
+| Guide | Contents |
+|-------|----------|
+| [Authentication](docs/authentication.md) | Local, multi-profile and assume-role modes; the startup credential checks |
+| [Running in a container](docs/container.md) | Multi-account AWS SSO with podman, image builds, cache volumes, troubleshooting |
+| [Resource tools](docs/tools.md) | `list_resources` views/filters/pagination, `count_resources` aggregation |
+| [Cost Explorer](docs/cost-explorer.md) | Periods, groupings, filter shape, response layout, per-request billing |
+| [Configuration](docs/configuration.md) | Commands, flags and environment variables, caching, client config |
+| [Development](docs/development.md) | Building, the awslib dependency, make targets, CI and releases |
+
+## Requirements
+
+Go 1.25+ to build, and AWS credentials the standard chain can resolve — an SSO
+session, a profile, environment variables or an instance role. Read-only IAM
+permissions are enough (`ce:GetCostAndUsage` and friends for the cost tools).
