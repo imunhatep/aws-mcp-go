@@ -43,12 +43,20 @@ Request flow, outermost to innermost:
 - `internal/command/serve.go` is the composition root for `serve`: parses flags into `internal/config.Config`, builds the client pool, builds the cache, then `mcpserver.NewServer(...)` + `ServeHTTP` (streamable-HTTP transport, endpoint `/mcp`).
 - `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go`.
 
-### The ClientPool abstraction (why two auth modes are transparent)
+### The ClientPool abstraction (why the auth modes are transparent)
 
-`mcpserver.ClientPool` (server.go) is a **local interface** with just `GetClients` + `ListAccountIDs`. Two awslib implementations satisfy it, and `buildClientPool` in `serve.go` picks one:
+`mcpserver.ClientPool` (server.go) is a **local interface** with just `GetClients` + `ListAccountIDs`. Three implementations satisfy it, and `buildClientPool` in `serve.go` picks one:
 
 - **Local mode** (default) → `provider.NewClientPool` — single account from the default AWS credential chain (SSO, `AWS_PROFILE`, env, IMDS).
+- **Multi-profile mode** (`--profiles`) → `mcpserver.NewProfilePool` (`profilepool.go`, this repo's own implementation) — one account per named AWS shared-config profile.
 - **Assume-role mode** (`--assume-role` or `--assume-role-arns`) → `v3.NewClientPool` — cross-account, either from explicit ARNs (`parseRoleArns`, accepts `accountID=roleArn` or a bare ARN) or auto-discovered from the current IAM role's policies.
+
+The modes are mutually exclusive — `config.Validate` rejects `--profiles` combined with either assume-role flag. Only the local and assume-role branches build the default `v3.ClientBuilder` and run `logCallerIdentity`; profile mode never touches the default credential chain.
+
+**`ProfilePool` specifics.** One `v3.ClientBuilder` + `provider.ClientPool` per profile. It deliberately does *not* use `v3.DefaultAwsClientProviders`: that helper folds ambient `AWS_ACCESS_KEY_ID` / `AWS_PROFILE` env credentials into the config, and a static credentials provider beats `WithSharedConfigProfile`, which would collapse every profile onto the same identity. So it builds the retry options plus `WithSharedConfigProfile` itself. Two invariants worth keeping:
+
+- **Eager identity, lazy regions** — the constructor does one STS `GetCallerIdentity` per profile (fails fast on expired SSO, and caches the account ID so `ListAccountIDs` answers before any region client exists); region clients are still created on demand by the inner pools.
+- **Dedupe by `(accountID, region)`** in `GetClients` — two profiles can point at the same account, and `fetchResources` fans out over every client without deduplicating, so duplicates would double rows and inflate counts. A profile that fails for a region is logged and skipped, not fatal.
 
 The rest of the server never branches on auth mode — it only sees the interface.
 
@@ -60,7 +68,7 @@ Both handlers share `Server.fetchResources` (`query.go`): resolve regions (one, 
 
 `handleCountResources`: parse `group_by` dims + filter → `aggregate` groups the (filtered) resources into `countBucket`s sorted by descending count → `countResult` envelope. This is the cheap path for "how many / break down by" questions — it never serializes rows.
 
-**Views** (`resourceDTO`): `viewID` (default, thin — identity + `State` lifted from attributes) → `viewSummary` (+ tags + curated `attributes`) → `viewDetail` (+ `raw`). `summaryAttributes` (`attributes.go`) type-switches on the concrete awslib entity (values, not pointers — `proxy` boxes them via `cast[T]`) and pulls the most relevant fields for common types (EC2, RDS, ELB, ECS, EKS, Lambda, DynamoDB, S3, Route53, Secrets Manager, EFS, SQS, SNS, IAM, ASG); unrecognized types get a nil map. `viewDetail` sets `raw` to `json.Marshal(r)` — since each entity embeds the raw AWS SDK struct (`ec2.Instance` embeds `types.Instance`), this yields every field generically, with no per-service code.
+**Views** (`resourceDTO`): `viewID` (default, thin — identity + `State` lifted from attributes) → `viewSummary` (+ tags + curated `attributes`) → `viewDetail` (+ `raw`). `summaryAttributes` (`attributes.go`) type-switches on the concrete awslib entity (values, not pointers — `proxy` boxes them via `cast[T]`) and pulls the most relevant fields for common types (EC2, RDS, ELB, ECS, EKS, Lambda, DynamoDB, S3, Route53, Secrets Manager, EFS, SQS, SNS, IAM, ASG, CloudFront); unrecognized types get a nil map. `viewDetail` sets `raw` to `json.Marshal(r)` — since each entity embeds the raw AWS SDK struct (`ec2.Instance` embeds `types.Instance`), this yields every field generically, with no per-service code.
 
 Notes:
 - Some SDK structs and `AbstractResource` both declare a `Type` field, so a bare `e.Type` in the switch is ambiguous — qualify it (`e.LoadBalancer.Type`, `e.ResourceRecordSet.Type`).
@@ -81,6 +89,8 @@ Cost Explorer is a billing API, not an inventory one, so it bypasses the resourc
 ### Resource-type registry — keep in sync with awslib
 
 `SupportedResourceTypes()` in `resource.go` is a hand-maintained allowlist that **must mirror awslib's `proxy.RepoProxy.FindAll` dispatch switch**. Types in awslib's registry but not wired into `FindAll` (e.g. Athena, CloudTrail) are deliberately omitted so callers never hit a "resource type not supported" error. When awslib adds/removes a `FindAll` case, update this list. `ResolveResourceType` accepts both canonical (`AWS::EC2::Instance`, case-insensitive) and URL (`aws_ec2_instance`) forms.
+
+CloudFront is present only as its SaaS Manager types — `AWS::CloudFront::DistributionTenantSummary` and `AWS::CloudFront::ConnectionGroup`. The full `AWS::CloudFront::DistributionTenant` is a per-identifier Get, not a list, so it stays out of the allowlist; classic **distributions are not listable at all** because awslib has no `ListDistributions` — exposing them needs an upstream repository method, resource type and `FindAll` case first. Both CloudFront types are in `cfg.ResourceTypeListGlobal()`, and awslib's `RepoProxyPool.List` already collapses global types to one proxy per account, so "all regions" does not fan out or duplicate rows.
 
 ### Cache
 

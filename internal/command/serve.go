@@ -61,6 +61,11 @@ func (c ServeCommand) Command() *cli.Command {
 				Usage:   "comma-separated assumable role ARNs (e.g. arn:aws:iam::111:role/r,arn:aws:iam::222:role/r or accountID=arn); enables cross-account mode and overrides auto-discovery",
 				Sources: cli.EnvVars("MCP_ASSUME_ROLE_ARNS"),
 			},
+			&cli.StringFlag{
+				Name:    "profiles",
+				Usage:   "comma-separated AWS shared-config profile names to serve (e.g. dev,prod); each profile becomes one account in the pool. Cannot be combined with the assume-role flags",
+				Sources: cli.EnvVars("MCP_AWS_PROFILES"),
+			},
 		},
 		Action: c.run,
 	}
@@ -75,21 +80,7 @@ func (c ServeCommand) run(ctx context.Context, cmd *cli.Command) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	providers, err := v3.DefaultAwsClientProviders()
-	if err != nil {
-		return errors.WithStack(err)
-	}
-
-	builder := v3.NewClientBuilder(ctx, providers...)
-
-	// Validate credentials up front and make the active identity visible, so a
-	// misconfigured or missing AWS credential chain fails loudly at startup
-	// rather than on the first tool call.
-	if err := logCallerIdentity(ctx, builder); err != nil {
-		return err
-	}
-
-	pool, err := buildClientPool(ctx, builder, cfg)
+	pool, err := buildClientPool(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -130,10 +121,39 @@ func logCallerIdentity(ctx context.Context, builder *v3.ClientBuilder) error {
 	return nil
 }
 
-// buildClientPool assembles the provider client pool. In local / single-account
-// mode it uses the default credential chain; in assume-role mode it either uses
-// explicit role ARNs or auto-discovers them from the current IAM role.
-func buildClientPool(ctx context.Context, builder *v3.ClientBuilder, cfg *config.Config) (mcpserver.ClientPool, error) {
+// buildClientPool assembles the provider client pool for the configured
+// authentication mode: multi-profile (--profiles), cross-account assume-role,
+// or local / single-account via the default credential chain.
+func buildClientPool(ctx context.Context, cfg *config.Config) (mcpserver.ClientPool, error) {
+	// Multi-profile mode: one account per named AWS shared-config profile. It
+	// does not use the default credential chain at all, so the default builder
+	// is never constructed here — NewProfilePool validates each profile's
+	// identity itself.
+	if cfg.Profiles != "" {
+		profiles, err := parseProfiles(cfg.Profiles)
+		if err != nil {
+			return nil, err
+		}
+
+		log.Info().Strs("profiles", profiles).Msg("[serve] using aws shared-config profiles")
+
+		return mcpserver.NewProfilePool(ctx, profiles)
+	}
+
+	providers, err := v3.DefaultAwsClientProviders()
+	if err != nil {
+		return nil, errors.WithStack(err)
+	}
+
+	builder := v3.NewClientBuilder(ctx, providers...)
+
+	// Validate credentials up front and make the active identity visible, so a
+	// misconfigured or missing AWS credential chain fails loudly at startup
+	// rather than on the first tool call.
+	if err := logCallerIdentity(ctx, builder); err != nil {
+		return nil, err
+	}
+
 	// Local / single-account mode: default credentials (AWS SSO, env, IMDS).
 	if !cfg.AssumeRole && cfg.AssumeRoleArns == "" {
 		log.Info().Msg("[serve] using local credentials (aws profile / sso / env)")
@@ -142,7 +162,6 @@ func buildClientPool(ctx context.Context, builder *v3.ClientBuilder, cfg *config
 
 	// Cross-account assume-role mode.
 	var roles map[ptypes.AwsAccountID]ptypes.RoleArn
-	var err error
 
 	if cfg.AssumeRoleArns != "" {
 		roles, err = parseRoleArns(cfg.AssumeRoleArns)
@@ -168,6 +187,34 @@ func buildClientPool(ctx context.Context, builder *v3.ClientBuilder, cfg *config
 	}
 
 	return v3.NewClientPool(ctx, builder, roles), nil
+}
+
+// parseProfiles parses a comma-separated list of AWS shared-config profile
+// names. Duplicates are rejected rather than silently collapsed, since a
+// repeated profile is a typo in the flag, not an intent.
+func parseProfiles(raw string) ([]string, error) {
+	profiles := []string{}
+	seen := map[string]bool{}
+
+	for entry := range strings.SplitSeq(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+
+		if seen[entry] {
+			return nil, errors.Errorf("duplicate aws profile %q in --profiles", entry)
+		}
+
+		seen[entry] = true
+		profiles = append(profiles, entry)
+	}
+
+	if len(profiles) == 0 {
+		return nil, errors.New("--profiles (MCP_AWS_PROFILES) is set but contains no profile names")
+	}
+
+	return profiles, nil
 }
 
 // parseRoleArns parses a comma-separated list of role specs. Each entry is

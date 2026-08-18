@@ -7,6 +7,7 @@ import (
 
 	"github.com/imunhatep/awslib/service"
 	"github.com/imunhatep/awslib/service/autoscaling"
+	"github.com/imunhatep/awslib/service/cloudfront"
 	"github.com/imunhatep/awslib/service/dynamodb"
 	"github.com/imunhatep/awslib/service/ec2"
 	"github.com/imunhatep/awslib/service/ecs"
@@ -206,6 +207,34 @@ func summaryAttributes(r service.ResourceInterface) map[string]any {
 		attrs := e.GetAttributes()
 		addStr(m, "subscriptions_confirmed", attrs["SubscriptionsConfirmed"])
 		addStr(m, "subscriptions_pending", attrs["SubscriptionsPending"])
+
+	case cloudfront.DistributionTenantSummary:
+		addStr(m, "state", aws.ToString(e.Status))
+		addBool(m, "enabled", e.Enabled)
+		addStr(m, "distribution_id", aws.ToString(e.DistributionId))
+		addStr(m, "connection_group_id", aws.ToString(e.ConnectionGroupId))
+		if domains := e.DomainNames(); len(domains) > 0 {
+			m["domains"] = domains
+			m["domains_active"] = e.DomainsActive()
+		}
+		if e.Customizations != nil {
+			if e.Customizations.Certificate != nil {
+				addStr(m, "certificate_arn", aws.ToString(e.Customizations.Certificate.Arn))
+			}
+			if e.Customizations.WebAcl != nil {
+				addStr(m, "web_acl_arn", aws.ToString(e.Customizations.WebAcl.Arn))
+				addStr(m, "web_acl_action", string(e.Customizations.WebAcl.Action))
+			}
+		}
+		addTime(m, "last_modified_at", e.LastModifiedTime)
+
+	case cloudfront.ConnectionGroup:
+		addStr(m, "state", aws.ToString(e.Status))
+		addBool(m, "enabled", e.Enabled)
+		addBool(m, "is_default", e.IsDefault)
+		addStr(m, "routing_endpoint", e.GetRoutingEndpoint())
+		addStr(m, "anycast_ip_list_id", aws.ToString(e.AnycastIpListId))
+		addTime(m, "last_modified_at", e.LastModifiedTime)
 
 	default:
 		return nil

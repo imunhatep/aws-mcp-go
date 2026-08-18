@@ -5,6 +5,7 @@ go 1.26.5
 require (
 	github.com/allegro/bigcache/v3 v3.1.0
 	github.com/aws/aws-sdk-go-v2 v1.43.3
+	github.com/aws/aws-sdk-go-v2/config v1.32.10
 	github.com/aws/aws-sdk-go-v2/service/configservice v1.61.1
 	github.com/aws/aws-sdk-go-v2/service/costexplorer v1.63.3
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.291.0
@@ -19,7 +20,6 @@ require (
 require (
 	github.com/Masterminds/semver v1.5.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.5 // indirect
-	github.com/aws/aws-sdk-go-v2/config v1.32.10 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.10 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.18 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.34 // indirect

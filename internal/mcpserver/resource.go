@@ -17,7 +17,9 @@ import (
 // list. The list mirrors the dispatch switch in proxy.RepoProxy.FindAll — types
 // present in cfg.ResourceTypeList() but not wired into FindAll (e.g. Athena,
 // CloudTrail) are intentionally excluded so callers never hit a
-// "resource type not supported" error.
+// "resource type not supported" error. Same reason CloudFront is represented by
+// DistributionTenantSummary rather than the full DistributionTenant: only the
+// summary form is listable — the full tenant comes from a per-identifier Get.
 func SupportedResourceTypes() []awscfg.ResourceType {
 	return []awscfg.ResourceType{
 		// asg
@@ -52,6 +54,9 @@ func SupportedResourceTypes() []awscfg.ResourceType {
 		awscfg.ResourceTypeVolume,
 		cfg.ResourceTypeSnapshot,
 		awscfg.ResourceTypeVpc,
+		// cloudfront (SaaS Manager; global control plane)
+		cfg.ResourceTypeCloudFrontDistributionTenantSummary,
+		cfg.ResourceTypeCloudFrontConnectionGroup,
 		// cloudwatch
 		cfg.ResourceTypeCloudWatchLogGroup,
 		// route53

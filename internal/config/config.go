@@ -25,6 +25,9 @@ type Config struct {
 	// AssumeRoleArns is a comma-separated list of assumable role ARNs; when set
 	// it enables cross-account mode and overrides auto-discovery.
 	AssumeRoleArns string
+	// Profiles is a comma-separated list of AWS shared-config profile names;
+	// when set, each profile is served as its own account.
+	Profiles string
 }
 
 // FromCommand builds a Config from the serve command's flags.
@@ -36,6 +39,7 @@ func FromCommand(cmd *cli.Command) *Config {
 		NoCache:        cmd.Bool("no-cache"),
 		AssumeRole:     cmd.Bool("assume-role"),
 		AssumeRoleArns: cmd.String("assume-role-arns"),
+		Profiles:       cmd.String("profiles"),
 	}
 }
 
@@ -44,5 +48,12 @@ func (c *Config) Validate() error {
 	if c.Addr == "" {
 		return errors.New("--addr (MCP_ADDR) is required")
 	}
+
+	// The three authentication modes are exclusive: local (no flags),
+	// multi-profile (--profiles) and cross-account (--assume-role*).
+	if c.Profiles != "" && (c.AssumeRole || c.AssumeRoleArns != "") {
+		return errors.New("--profiles cannot be combined with --assume-role or --assume-role-arns; pick one authentication mode")
+	}
+
 	return nil
 }

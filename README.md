@@ -27,7 +27,7 @@ The image compiles from the vendored dependency tree, so `make image` runs
 inside the image.
 
 ```sh
-make image                  # -> ghcr.io/imunhatep/aws-mcp-go:dev
+make image                  # -> ghcr.io/imunhatep/aws-mcp-go:latest
 make image VERSION=v0.1.0   # -> ghcr.io/imunhatep/aws-mcp-go:v0.1.0
 ```
 
@@ -47,7 +47,7 @@ podman run --rm -d \
   -e AWS_PROFILE \
   -e AWS_REGION \
   -v ~/.aws:/home/nonroot/.aws:ro \
-  -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:dev
+  -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:latest
 ```
 
 Static or role credentials from the current shell instead, in cross-account
@@ -56,7 +56,7 @@ mode:
 ```sh
 podman run --rm -p 127.0.0.1:3040:3040 \
   -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION \
-  ghcr.io/imunhatep/aws-mcp-go:dev serve --assume-role
+  ghcr.io/imunhatep/aws-mcp-go:latest serve --assume-role
 ```
 
 > The runtime image is distroless and has **no shell**, so a mounted profile
@@ -90,7 +90,7 @@ podman run --rm -d --name aws-mcp \
   -e AWS_PROFILE -e MCP_CACHE_DIR=/cache -e MCP_CACHE_TTL=6h \
   -v ~/.aws:/home/nonroot/.aws:ro \
   -v aws-mcp-cache:/cache:U \
-  -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:dev
+  -p 127.0.0.1:3040:3040 ghcr.io/imunhatep/aws-mcp-go:latest
 ```
 
 Multi-arch manifest (override `IMAGE` to tag for a different registry):
@@ -115,7 +115,7 @@ claude mcp add --transport http aws http://127.0.0.1:3040/mcp
 ## Authentication
 
 The server uses the standard AWS credential chain, so it works with anything
-`aws-sdk-go-v2` understands. Two modes:
+`aws-sdk-go-v2` understands. Three mutually exclusive modes:
 
 ### Local mode (default) — AWS profile / SSO / env
 
@@ -126,6 +126,33 @@ Single account, using whatever credentials the default chain resolves
 aws sso login --profile my-sso-profile
 AWS_PROFILE=my-sso-profile ./bin/aws-mcp serve
 ```
+
+### Multi-profile mode — one account per profile
+
+Serves several AWS shared-config profiles from a single process, each as its own
+account. Useful when the accounts are reachable as separate profiles (SSO,
+static keys, `credential_process`) rather than through assumable roles:
+
+```sh
+aws sso login --profile dev
+aws sso login --profile prod
+./bin/aws-mcp serve --profiles dev,prod
+```
+
+Every tool then spans all profiles: `list_accounts` reports each account,
+`list_resources` / `count_resources` fan out across them, and the Cost Explorer
+tools return per-account groups.
+
+Notes:
+
+- Each profile's identity is resolved with one STS call at startup, so a missing
+  or expired profile aborts the server with the profile named in the error.
+  Region clients are still created lazily on first use.
+- Only the named profile's credentials are used — ambient `AWS_PROFILE` /
+  `AWS_ACCESS_KEY_ID` env vars do not override them.
+- If two profiles point at the same account, the duplicate `(account, region)`
+  pair is dropped so results are not counted twice.
+- `--profiles` cannot be combined with `--assume-role` / `--assume-role-arns`.
 
 ### Assume-role mode — cross-account
 
@@ -153,6 +180,7 @@ Assumes IAM roles in other accounts, chaining off the base credentials' STS.
 | `--cache-ttl` | `MCP_CACHE_TTL` | `6h` | TTL for cached resource listings (e.g. `6h`, `30m`) |
 | `--cache-dir` | `MCP_CACHE_DIR` | OS temp dir | On-disk cache directory; empty = in-memory only |
 | `--no-cache` | | `false` | Disable caching entirely |
+| `--profiles` | `MCP_AWS_PROFILES` | | Comma-separated AWS shared-config profiles to serve, one account each (excludes the assume-role flags) |
 | `--assume-role` | | `false` | Auto-discover assumable roles from the current IAM role |
 | `--assume-role-arns` | `MCP_ASSUME_ROLE_ARNS` | | Explicit assumable role ARNs (implies assume-role mode) |
 | `--verbose` / `-v` | `AWS_MCP_VERBOSE`, `LOG_LEVEL` | `3` | Log verbosity: `0`=fatal … `5`=trace (global flag) |
@@ -196,7 +224,8 @@ type — an EC2 instance yields `instance_type`, `instance_family`, `state`,
 balancer yields `lb_type`, `scheme`, `dns_name`, `state`. Curated types include
 EC2 (instance/volume/snapshot/vpc), RDS (instance/snapshot), ELBv2, ECS
 (cluster/service), EKS, Lambda, DynamoDB, S3, Route53, Secrets Manager, EFS, SQS,
-SNS, IAM users and Auto Scaling groups.
+SNS, IAM users, Auto Scaling groups and CloudFront (distribution tenants /
+connection groups).
 
 Filters narrow results server-side (so payload scales with the answer, not the
 inventory): `state` (case-insensitive lifecycle match, e.g. `running`), `tag`
@@ -338,7 +367,7 @@ The container build reads `vendor/` too.
 | `make test` | `go test ./...` |
 | `make tidy` | `go mod tidy && go mod vendor` |
 | `make run` | Build, then `serve` |
-| `make image` | Vendor, then build `$(IMAGE):$(VERSION)` (defaults to `ghcr.io/imunhatep/aws-mcp-go:dev`) with podman |
+| `make image` | Vendor, then build `$(IMAGE):$(VERSION)` (defaults to `ghcr.io/imunhatep/aws-mcp-go:latest`) with podman |
 | `make image-multiarch` | Same as a `linux/amd64,linux/arm64` manifest |
 
 ### CI & releases
