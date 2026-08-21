@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	ptypes "github.com/imunhatep/awslib/provider/types"
+	"github.com/imunhatep/awslib/resources"
 	"github.com/imunhatep/awslib/service"
 	"github.com/imunhatep/awslib/service/cloudcontrol"
 )
@@ -241,35 +243,79 @@ func TestDedupeFallbackWithoutArnKeepsSameIdInDifferentRegions(t *testing.T) {
 
 func TestFallbackWarnings(t *testing.T) {
 	t.Run("duplicates are reported", func(t *testing.T) {
-		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", queryScope{}, 4)
+		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", fallbackFetch{}, 4)
 		assert.Contains(t, joined(got), "collapsed 4 duplicate")
 	})
 
 	t.Run("steers callers to the typed tool for supported types", func(t *testing.T) {
-		got := fallbackWarnings(awscfg.ResourceTypeInstance, "AWS::EC2::Instance", queryScope{}, 0)
+		got := fallbackWarnings(awscfg.ResourceTypeInstance, "AWS::EC2::Instance", fallbackFetch{}, 0)
 		assert.Contains(t, joined(got), "list_resources returns richer")
 	})
 
 	t.Run("no steer for an unsupported type", func(t *testing.T) {
-		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", queryScope{}, 0)
+		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", fallbackFetch{}, 0)
 		assert.NotContains(t, joined(got), "list_resources returns richer")
 	})
 
 	t.Run("normalization is disclosed", func(t *testing.T) {
-		got := fallbackWarnings(awscfg.ResourceTypeInstance, "aws::ec2::instance", queryScope{}, 0)
+		got := fallbackWarnings(awscfg.ResourceTypeInstance, "aws::ec2::instance", fallbackFetch{}, 0)
 		assert.Contains(t, joined(got), "normalized to")
 	})
 
 	t.Run("detail cost is disclosed", func(t *testing.T) {
-		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", queryScope{Detailed: true}, 0)
+		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", fallbackFetch{scope: queryScope{Detailed: true}}, 0)
 		assert.Contains(t, joined(got), "one extra GetResource call")
 	})
 
 	t.Run("always states the backend", func(t *testing.T) {
-		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", queryScope{}, 0)
+		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", fallbackFetch{}, 0)
 		assert.NotEmpty(t, got)
 		assert.Contains(t, joined(got), "Cloud Control API")
 	})
+
+	// An unreachable region is the difference between "no resources" and "we
+	// could not look", so it must be stated first and name the pair and reason.
+	t.Run("incomplete sweep is reported first, with the reason", func(t *testing.T) {
+		fetched := fallbackFetch{
+			scope: queryScope{Accounts: 2, Regions: 3, Unreachable: 1},
+			failures: []resources.ProxyFailure{
+				{AccountID: "111111111111", Region: "me-south-1", Err: errors.New("timed out after 1m0s")},
+			},
+		}
+
+		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", fetched, 0)
+
+		require.NotEmpty(t, got)
+		assert.Contains(t, got[0], "incomplete", "an incomplete sweep must be the first warning")
+		assert.Contains(t, got[0], "1 of 6")
+		assert.Contains(t, got[0], "me-south-1")
+		assert.Contains(t, got[0], "timed out")
+	})
+
+	t.Run("no incomplete warning when every proxy answered", func(t *testing.T) {
+		got := fallbackWarnings(awscfg.ResourceType("AWS::Kinesis::Stream"), "AWS::Kinesis::Stream", fallbackFetch{}, 0)
+		assert.NotContains(t, joined(got), "incomplete")
+	})
+}
+
+// TestDescribeFailuresIsBounded keeps a broadly broken sweep from producing an
+// unreadable warning, while still reporting the true total.
+func TestDescribeFailuresIsBounded(t *testing.T) {
+	failures := make([]resources.ProxyFailure, 0, 9)
+	for _, region := range []string{"r1", "r2", "r3", "r4", "r5", "r6", "r7", "r8", "r9"} {
+		failures = append(failures, resources.ProxyFailure{
+			AccountID: "111111111111",
+			Region:    ptypes.AwsRegion(region),
+			Err:       errors.New("nope"),
+		})
+	}
+
+	got := describeFailures(failures)
+
+	assert.Contains(t, got, "r1")
+	assert.Contains(t, got, "r5")
+	assert.NotContains(t, got, "r6", "beyond the cap, pairs are summarised rather than listed")
+	assert.Contains(t, got, "and 4 more")
 }
 
 func joined(warnings []string) string {

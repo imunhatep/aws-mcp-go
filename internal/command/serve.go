@@ -6,6 +6,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
@@ -130,6 +131,24 @@ func logCallerIdentity(ctx context.Context, builder *v3.ClientBuilder) error {
 	return nil
 }
 
+// failureTTL keeps the client-failure cache on the same clock as the resource
+// cache, so --cache-ttl moves both instead of leaving a second, hidden window.
+//
+// Both answer the same question — has anything changed since we last looked? — and
+// a region an account has not enabled does not become enabled between two queries
+// minutes apart. It is deliberately not tied to --no-cache: that switches off
+// caching of AWS *answers*, whereas this only avoids re-probing regions already
+// known to be unusable, which is what makes an all-region sweep affordable.
+// Credential failures are never cached at any TTL, so re-authenticating always
+// takes effect immediately.
+func failureTTL(cfg *config.Config) time.Duration {
+	if cfg.CacheTTL > 0 {
+		return cfg.CacheTTL
+	}
+
+	return mcpserver.DefaultCacheTTL
+}
+
 // buildClientPool assembles the provider client pool for the configured
 // authentication mode: multi-profile (--profiles), cross-account assume-role,
 // or local / single-account via the default credential chain.
@@ -146,7 +165,12 @@ func buildClientPool(ctx context.Context, cfg *config.Config) (mcpserver.ClientP
 
 		log.Info().Strs("profiles", profiles).Msg("[serve] using aws shared-config profiles")
 
-		return mcpserver.NewProfilePool(ctx, profiles)
+		pool, err := mcpserver.NewProfilePool(ctx, profiles)
+		if err != nil {
+			return nil, err
+		}
+
+		return pool.WithFailureTTL(failureTTL(cfg)), nil
 	}
 
 	providers, err := v3.DefaultAwsClientProviders()
@@ -166,7 +190,7 @@ func buildClientPool(ctx context.Context, cfg *config.Config) (mcpserver.ClientP
 	// Local / single-account mode: default credentials (AWS SSO, env, IMDS).
 	if !cfg.AssumeRole && cfg.AssumeRoleArns == "" {
 		log.Info().Msg("[serve] using local credentials (aws profile / sso / env)")
-		return provider.NewClientPool(ctx, builder), nil
+		return provider.NewClientPool(ctx, builder).WithFailureTTL(failureTTL(cfg)), nil
 	}
 
 	// Cross-account assume-role mode.
@@ -195,7 +219,7 @@ func buildClientPool(ctx context.Context, cfg *config.Config) (mcpserver.ClientP
 		return nil, errors.New("assume-role mode enabled but no assumable roles were found")
 	}
 
-	return v3.NewClientPool(ctx, builder, roles), nil
+	return v3.NewClientPool(ctx, builder, roles).WithFailureTTL(failureTTL(cfg)), nil
 }
 
 // parseProfiles parses a comma-separated list of AWS shared-config profile

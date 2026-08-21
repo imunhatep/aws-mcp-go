@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -63,15 +64,26 @@ func ResolveFallbackResourceType(raw string) (awscfg.ResourceType, error) {
 
 // queryScope records what the fallback actually reached out to, so a caller can
 // tell an empty answer ("queried 12 accounts, found nothing") apart from a
-// narrow one ("queried 1 account"). Cloud Control returns an error for a type
-// with no LIST handler rather than an empty list, but a missing IAM grant in
-// some accounts still degrades to fewer rows, and the fan-out below logs those
-// failures rather than propagating them.
+// narrow one ("queried 1 account") — and, via Unreachable, from an incomplete
+// one. A missing IAM grant or an unroutable region no longer degrades silently
+// into fewer rows: those pairs are counted here and named in warnings.
 type queryScope struct {
 	Source   string `json:"source"`
 	Accounts int    `json:"accounts"`
 	Regions  int    `json:"regions"`
 	Detailed bool   `json:"detailed"`
+	// Unreachable counts the account/region pairs that errored or timed out.
+	// Non-zero means the item list is short for a reason other than the estate
+	// being small — the details are named in warnings.
+	Unreachable int `json:"unreachable"`
+}
+
+// fallbackFetch is what one generic query produced: the resources, the scope it
+// covered, and the proxies that could not be reached.
+type fallbackFetch struct {
+	items    []service.ResourceInterface
+	scope    queryScope
+	failures []resources.ProxyFailure
 }
 
 // fallbackResult is the list_resources_fallback envelope. It mirrors listResult
@@ -95,12 +107,17 @@ func (s *Server) fetchFallbackResources(
 	rt awscfg.ResourceType,
 	regions []ptypes.AwsRegion,
 	detailed bool,
-) ([]service.ResourceInterface, queryScope, error) {
-	scope := queryScope{Source: "cloudcontrol", Detailed: detailed}
+	accountID string,
+) (fallbackFetch, error) {
+	out := fallbackFetch{scope: queryScope{Source: "cloudcontrol", Detailed: detailed}}
 
-	clients, err := s.pool.GetClients(regions...)
+	// A non-empty accountID scopes the fan-out rather than the rows: Cloud
+	// Control calls are only issued against that account. This matters more here
+	// than on the typed path, since view=detail costs one GetResource per
+	// resource in every account reached.
+	clients, err := s.poolClients(accountID, regions)
 	if err != nil {
-		return nil, scope, errors.WithStack(err)
+		return out, errors.WithStack(err)
 	}
 
 	accounts := map[ptypes.AwsAccountID]struct{}{}
@@ -109,14 +126,22 @@ func (s *Server) fetchFallbackResources(
 		accounts[client.GetAccountID()] = struct{}{}
 		regionSet[client.GetRegion()] = struct{}{}
 	}
-	scope.Accounts, scope.Regions = len(accounts), len(regionSet)
+	out.scope.Accounts, out.scope.Regions = len(accounts), len(regionSet)
 
 	proxyPool := proxy.NewGenericRepoProxyPool(s.ctx, clients, detailed)
 	if s.cache != nil {
 		proxyPool = proxyPool.WithCache(s.cache)
 	}
 
-	return resources.NewProvider(rt, proxyPool.List(rt)...).Run().Read(), scope, nil
+	// The reader now reports the proxies that errored or timed out, so a short
+	// list can be qualified instead of passed off as complete.
+	reader := resources.NewProvider(rt, proxyPool.List(rt)...).Run()
+
+	out.items = reader.Read()
+	out.failures = reader.Failures()
+	out.scope.Unreachable = len(out.failures)
+
+	return out, nil
 }
 
 // dedupeFallback removes rows that describe the same resource twice.
@@ -203,12 +228,12 @@ func (s *Server) handleListResourcesFallback(_ context.Context, req mcp.CallTool
 		Int("limit", limit).
 		Msg("[mcpserver.handleListResourcesFallback] listing resources via cloud control")
 
-	items, scope, err := s.fetchFallbackResources(rt, regions, detailed)
+	fetched, err := s.fetchFallbackResources(rt, regions, detailed, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to list resources", err), nil
 	}
 
-	items, duplicates := dedupeFallback(items)
+	items, duplicates := dedupeFallback(fetched.items)
 
 	out := make([]resourceDTO, 0, len(items))
 	for _, r := range items {
@@ -226,15 +251,51 @@ func (s *Server) handleListResourcesFallback(_ context.Context, req mcp.CallTool
 		Count:      page.Count,
 		Total:      page.Total,
 		NextCursor: page.NextCursor,
-		Queried:    scope,
-		Warnings:   fallbackWarnings(rt, rawType, scope, duplicates),
+		Queried:    fetched.scope,
+		Warnings:   fallbackWarnings(rt, rawType, fetched, duplicates),
 	})
+}
+
+// maxNamedFailures bounds how many unreachable pairs a warning names, so a
+// broadly broken sweep produces a readable sentence rather than 60 of them. The
+// count in the warning is always the true total.
+const maxNamedFailures = 5
+
+// describeFailures renders the unreachable account/region pairs with the reason,
+// which is what makes the warning actionable — "not enabled for this account" and
+// "timed out" call for different responses from the caller.
+func describeFailures(failures []resources.ProxyFailure) string {
+	named := failures
+	suffix := ""
+
+	if len(named) > maxNamedFailures {
+		named = named[:maxNamedFailures]
+		suffix = fmt.Sprintf(" and %d more", len(failures)-maxNamedFailures)
+	}
+
+	parts := make([]string, 0, len(named))
+	for _, f := range named {
+		parts = append(parts, fmt.Sprintf("%s/%s (%v)", f.AccountID, f.Region, f.Err))
+	}
+
+	return strings.Join(parts, "; ") + suffix
 }
 
 // fallbackWarnings states what the caller cannot see from the rows alone. An
 // inventory answer that is quietly partial is worse than one that says so.
-func fallbackWarnings(rt awscfg.ResourceType, rawType string, scope queryScope, duplicates int) []string {
+func fallbackWarnings(rt awscfg.ResourceType, rawType string, fetched fallbackFetch, duplicates int) []string {
 	var warnings []string
+
+	// Named first: an incomplete sweep changes how every other number below
+	// should be read.
+	if len(fetched.failures) > 0 {
+		warnings = append(warnings, errors.Errorf(
+			"incomplete: %d of %d account/region pairs could not be queried, so resources there are missing from this list — %s",
+			len(fetched.failures),
+			fetched.scope.Accounts*fetched.scope.Regions,
+			describeFailures(fetched.failures),
+		).Error())
+	}
 
 	if duplicates > 0 {
 		warnings = append(warnings, errors.Errorf(
@@ -257,9 +318,9 @@ func fallbackWarnings(rt awscfg.ResourceType, rawType string, scope queryScope, 
 		).Error())
 	}
 
-	warnings = append(warnings, "answered from the Cloud Control API: attributes are the provider's own property names rather than curated fields, and a resource is missing entirely if the credentials for its account lack the underlying service's read permission (such failures are logged, not returned)")
+	warnings = append(warnings, "answered from the Cloud Control API: attributes are the provider's own property names rather than curated fields, and an account whose credentials lack the underlying service's read permission is counted in queried.unreachable rather than contributing rows")
 
-	if scope.Detailed {
+	if fetched.scope.Detailed {
 		warnings = append(warnings, "detail view issues one extra GetResource call per resource")
 	}
 

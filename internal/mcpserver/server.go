@@ -28,8 +28,35 @@ type ClientPool interface {
 	// GetClients returns one client per requested region (per account, in
 	// assume-role mode). Clients are cached inside the pool across calls.
 	GetClients(regions ...ptypes.AwsRegion) ([]*v3.Client, error)
+	// GetAccountClients returns clients for a single account.
+	//
+	// This exists because filtering afterwards is too late: creating a client
+	// assumes that account's role (or uses that profile's credentials), so a
+	// query scoped to one account must be scoped here, before any other
+	// account has been touched. An account the pool cannot reach must be an
+	// error, not an empty slice — otherwise a caller asking about the wrong
+	// account is told it holds nothing.
+	GetAccountClients(accountID ptypes.AwsAccountID, regions ...ptypes.AwsRegion) ([]*v3.Client, error)
 	// ListAccountIDs returns the account IDs the pool can reach.
 	ListAccountIDs() ([]ptypes.AwsAccountID, error)
+}
+
+// poolClients resolves the clients a query should run against, scoping to one
+// account when the caller asked for one.
+//
+// The scoping has to happen here rather than on the resulting rows. Creating a
+// client assumes the target account's role or exercises that profile's
+// credentials, and every client is then fanned out over by the provider — so an
+// account_id applied after the fetch would still have issued API calls against
+// every other account in the pool, and merely hidden their rows. For a server
+// whose pool spans both a development and a production account, that difference
+// is the whole point of the argument.
+func (s *Server) poolClients(accountID string, regions []ptypes.AwsRegion) ([]*v3.Client, error) {
+	if accountID == "" {
+		return s.pool.GetClients(regions...)
+	}
+
+	return s.pool.GetAccountClients(ptypes.AwsAccountID(accountID), regions...)
 }
 
 // Server wires the AWS client pool and resource cache into an MCP server that

@@ -61,6 +61,23 @@ The modes are mutually exclusive — `config.Validate` rejects `--profiles` comb
 
 The rest of the server never branches on auth mode — it only sees the interface.
 
+**Account scoping is a client-selection concern, not a filter.** `ClientPool` has
+`GetAccountClients(accountID, regions...)` alongside `GetClients(regions...)`, and
+`Server.poolClients` (`server.go`) picks between them from the `account_id`
+argument. This has to happen before any client exists: building one assumes the
+target account's role (`v3.ClientPool`) or exercises that profile's credentials
+(`ProfilePool`), so an `account_id` applied to the resulting *rows* would already
+have issued API calls against every other account and merely hidden their output.
+On a pool spanning a development and a production account that difference is the
+entire value of the argument. Two rules follow:
+
+- **An unreachable account is an error, never an empty result** — in all three
+  pools. Answering "no resources" for an account the server cannot even reach is
+  the silent-wrong-answer failure this codebase keeps having to design against.
+- **Every new fetch path must go through `poolClients`**, not `s.pool` directly.
+  `TestFetchPathsScopeByAccount` pins both existing paths with a spy pool that
+  fails if the unscoped method is reached.
+
 ### list_resources / count_resources data path
 
 Both handlers share `Server.fetchResources` (`query.go`): resolve regions (one, or all via `ptypes.GetAwsRegionList()`) → `pool.GetClients(regions...)` → `proxy.NewRepoProxyPool(ctx, clients).WithCache(dc)` → `resources.NewProvider(rt, proxyPool.List(rt)...).Run().Read()`. The awslib proxy/provider does the parallel fan-out and caching; this repo drives it, then filters/projects/paginates/aggregates the resulting `[]service.ResourceInterface` in-memory.

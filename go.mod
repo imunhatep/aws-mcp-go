@@ -12,7 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/configservice v1.68.7
 	github.com/aws/aws-sdk-go-v2/service/costexplorer v1.67.7
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.322.0
-	github.com/imunhatep/awslib v0.6.0
+	github.com/imunhatep/awslib v0.7.0
 	github.com/imunhatep/gocollection v0.2.1
 	github.com/mark3labs/mcp-go v0.57.0
 	github.com/rs/zerolog v1.35.1

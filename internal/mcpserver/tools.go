@@ -49,7 +49,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Optional AWS region (e.g. eu-central-1). If omitted, all known regions are queried. Ignored for global resource types."),
 			),
 			mcp.WithString("account_id",
-				mcp.Description("Optional AWS account ID to filter results by. Most relevant in assume-role mode."),
+				mcp.Description("Optional AWS account ID. Scopes the query to that one account — only its credentials are used and only it is called, rather than querying every reachable account and filtering the rows. An account this server cannot reach is an error, not an empty result. Call list_accounts for the reachable IDs."),
 			),
 			mcp.WithString("view",
 				mcp.Description("Response richness per row: 'id' (default, thin: identity + state), 'summary' (adds tags and curated attributes like instance_type/engine/dns_name), or 'detail' (adds a raw field with the full provider-native entity). Use detail only with a region + filters so the result stays small."),
@@ -88,7 +88,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Optional AWS region. If omitted, all known regions are queried. Ignored for global resource types."),
 			),
 			mcp.WithString("account_id",
-				mcp.Description("Optional AWS account ID to filter by."),
+				mcp.Description("Optional AWS account ID. Scopes the query to that one account rather than counting across every reachable account. An unreachable account is an error, not a zero count."),
 			),
 			mcp.WithString("state",
 				mcp.Description("Optional lifecycle state/status filter, case-insensitive (e.g. 'running')."),
@@ -115,7 +115,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Optional AWS region (e.g. eu-central-1). If omitted, all known regions are queried — pass a region for a global resource type, otherwise it is fetched once per region and the duplicates are collapsed (reported in warnings)."),
 			),
 			mcp.WithString("account_id",
-				mcp.Description("Optional AWS account ID to filter results by."),
+				mcp.Description("Optional AWS account ID. Scopes the query to that one account — only it is called, which also bounds the per-resource detail calls. An unreachable account is an error, not an empty result."),
 			),
 			mcp.WithString("view",
 				mcp.Description("Response richness per row: 'id' (default, thin: identity + state), 'summary' (adds tags and the resource's top-level scalar properties as snake_case attributes), or 'detail' (adds raw with the full property bag). Note detail costs one extra AWS call per resource, so pair it with a region and filters."),
@@ -222,7 +222,7 @@ func (s *Server) handleListResources(_ context.Context, req mcp.CallToolRequest)
 		Int("limit", limit).
 		Msg("[mcpserver.handleListResources] listing resources")
 
-	items, err := s.fetchResources(rt, regions)
+	items, err := s.fetchResources(rt, regions, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to list resources", err), nil
 	}
@@ -268,7 +268,7 @@ func (s *Server) handleCountResources(_ context.Context, req mcp.CallToolRequest
 		Int("regions", len(regions)).
 		Msg("[mcpserver.handleCountResources] counting resources")
 
-	items, err := s.fetchResources(rt, regions)
+	items, err := s.fetchResources(rt, regions, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to count resources", err), nil
 	}

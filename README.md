@@ -56,14 +56,24 @@ question you ask.
 |------|---------|
 | `list_resources` | "Show me the …" — paginated rows, three levels of detail, server-side filters |
 | `count_resources` | "How many / break down by …" — grouped counts, no rows shipped |
+| `list_resources_fallback` | "…but that type isn't supported" — almost any AWS type, via Cloud Control |
 | `list_accounts`, `list_regions`, `list_resource_types` | What this server can reach |
 | `get_cost_and_usage` | "What did we spend on …" — grouped, filtered, multi-account |
 | `get_cost_forecast` | "What will we spend …" |
 | `list_cost_dimensions`, `list_cost_dimension_values` | The cost vocabulary, and the exact strings filters need |
 
-Coverage spans EC2, RDS, ELB, ECS, EKS, Lambda, DynamoDB, S3, Route53, Secrets
-Manager, EFS, SQS, SNS, IAM, Auto Scaling and CloudFront — call
-`list_resource_types` for the current list.
+Curated coverage spans EC2, RDS, ELB, ECS, EKS, Lambda, DynamoDB, S3, Route53,
+Secrets Manager, EFS, SQS, SNS, IAM, Auto Scaling and CloudFront — call
+`list_resource_types` for the current list. Those types get hand-picked
+attributes and the richest output.
+
+For anything outside that list, `list_resources_fallback` reaches almost any
+`AWS::Service::Resource` type through the AWS Cloud Control API, with no
+per-type support needed. It is a genuine fallback rather than a replacement —
+attributes are the resource's own raw property names, ARNs and creation times
+are often absent, and its `detail` view costs one extra AWS call per resource —
+so prefer `list_resources` whenever the type is supported. See
+[Resource tools](docs/tools.md#list_resources_fallback--types-with-no-dedicated-support).
 
 ## Documentation
 
@@ -71,7 +81,7 @@ Manager, EFS, SQS, SNS, IAM, Auto Scaling and CloudFront — call
 |-------|----------|
 | [Authentication](docs/authentication.md) | Local, multi-profile and assume-role modes; the startup credential checks |
 | [Running in a container](docs/container.md) | Multi-account AWS SSO with podman, image builds, cache volumes, troubleshooting |
-| [Resource tools](docs/tools.md) | `list_resources` views/filters/pagination, `count_resources` aggregation |
+| [Resource tools](docs/tools.md) | `list_resources` views/filters/pagination, `count_resources` aggregation, `list_resources_fallback` for unsupported types |
 | [Cost Explorer](docs/cost-explorer.md) | Periods, groupings, filter shape, response layout, per-request billing |
 | [Configuration](docs/configuration.md) | Commands, flags and environment variables, caching, client config |
 | [Development](docs/development.md) | Building, the awslib dependency, make targets, CI and releases |
@@ -80,4 +90,7 @@ Manager, EFS, SQS, SNS, IAM, Auto Scaling and CloudFront — call
 
 Go 1.25+ to build, and AWS credentials the standard chain can resolve — an SSO
 session, a profile, environment variables or an instance role. Read-only IAM
-permissions are enough (`ce:GetCostAndUsage` and friends for the cost tools).
+permissions are enough (`ce:GetCostAndUsage` and friends for the cost tools;
+`cloudcontrol:ListResources` / `GetResource` plus the target service's own read
+permission for `list_resources_fallback`, which a broad `ReadOnlyAccess`-style
+policy already covers).

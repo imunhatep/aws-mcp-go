@@ -25,9 +25,22 @@ aws sso login --sso-session my-session      # one login covers every profile on 
 ```
 
 Every tool then spans all profiles: `list_accounts` reports each account,
-`list_resources` / `count_resources` fan out across them, and the Cost Explorer
-tools return per-account groups. To run this in a container, see
-[Running in a container](container.md).
+`list_resources` / `count_resources` / `list_resources_fallback` fan out across
+them, and the Cost Explorer tools return per-account groups. To run this in a
+container, see [Running in a container](container.md).
+
+Pass `account_id` to confine a query to one account. It scopes the fan-out, not
+the output: only that account's profile credentials are used and only that
+account is called, so a query against a development account issues no API calls
+against a production one in the same pool. An account no profile points at is an
+error rather than an empty result.
+
+One caveat specific to `list_resources_fallback`: a per-account permission gap is
+invisible in the rows. It needs `cloudcontrol:ListResources` plus the target
+service's own read permission in *every* account it queries, and an account that
+denies either is logged and skipped rather than failing the call — so the result
+is quietly short. Its `queried` field reports how many accounts were actually
+asked, and its `warnings` field says so explicitly.
 
 Notes:
 
