@@ -57,10 +57,46 @@ func TestListTools(t *testing.T) {
 
 	for _, want := range []string{
 		"list_resource_types", "list_regions", "list_accounts", "list_resources", "count_resources",
+		"list_resources_fallback",
 		"get_cost_and_usage", "get_cost_forecast", "list_cost_dimension_values", "list_cost_dimensions",
 	} {
 		assert.Truef(t, names[want], "expected tool %q to be registered", want)
 	}
+}
+
+// TestListResourcesFallbackRejectsMalformedType uses the nil ClientPool as a
+// tripwire: the fallback resolves the resource type before reaching for the
+// pool, so if that validation ever moved after the pool access this would panic
+// instead of returning an error result.
+func TestListResourcesFallbackRejectsMalformedType(t *testing.T) {
+	c, ctx := startTestServer(t)
+
+	for _, bad := range []string{"", "ec2 instances please", "AWS::EC2"} {
+		req := mcp.CallToolRequest{}
+		req.Params.Name = "list_resources_fallback"
+		req.Params.Arguments = map[string]any{"resource_type": bad}
+
+		res, err := c.CallTool(ctx, req)
+		require.NoError(t, err)
+		assert.Truef(t, res.IsError, "expected resource_type %q to be rejected", bad)
+	}
+}
+
+// TestListResourcesFallbackRejectsBadView pins that every argument is validated
+// before the pool is touched, not just the resource type.
+func TestListResourcesFallbackRejectsBadView(t *testing.T) {
+	c, ctx := startTestServer(t)
+
+	req := mcp.CallToolRequest{}
+	req.Params.Name = "list_resources_fallback"
+	req.Params.Arguments = map[string]any{
+		"resource_type": "AWS::Kinesis::Stream",
+		"view":          "everything",
+	}
+
+	res, err := c.CallTool(ctx, req)
+	require.NoError(t, err)
+	assert.True(t, res.IsError, "an invalid view must be rejected before any AWS access")
 }
 
 func TestListCostDimensionsTool(t *testing.T) {

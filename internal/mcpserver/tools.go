@@ -103,6 +103,42 @@ func (s *Server) registerTools() {
 		s.handleCountResources,
 	)
 
+	s.mcp.AddTool(
+		mcp.NewTool(
+			"list_resources_fallback",
+			mcp.WithDescription("Last-resort lister for AWS resource types that list_resources does not support. Answers from the AWS Cloud Control API, which can enumerate almost any AWS::Service::Resource type without a dedicated implementation. Prefer list_resources whenever list_resource_types includes the type: it returns curated, typed attributes, while this tool returns the provider's own raw property names, cannot always determine an ARN, and reports no creation time. Types whose Cloud Control registry entry has no LIST handler return an error rather than an empty list. Returns {items, count, total, next_cursor, queried, warnings} — read warnings, they qualify the answer."),
+			mcp.WithString("resource_type",
+				mcp.Required(),
+				mcp.Description("Resource type in CloudFormation form (AWS::Kinesis::Stream). Case-insensitive for well-known types; for anything else the exact CloudFormation spelling is required because the Cloud Control type name is case-sensitive. The URL form (aws_kinesis_stream) also works for types list_resource_types knows."),
+			),
+			mcp.WithString("region",
+				mcp.Description("Optional AWS region (e.g. eu-central-1). If omitted, all known regions are queried — pass a region for a global resource type, otherwise it is fetched once per region and the duplicates are collapsed (reported in warnings)."),
+			),
+			mcp.WithString("account_id",
+				mcp.Description("Optional AWS account ID to filter results by."),
+			),
+			mcp.WithString("view",
+				mcp.Description("Response richness per row: 'id' (default, thin: identity + state), 'summary' (adds tags and the resource's top-level scalar properties as snake_case attributes), or 'detail' (adds raw with the full property bag). Note detail costs one extra AWS call per resource, so pair it with a region and filters."),
+			),
+			mcp.WithString("state",
+				mcp.Description("Filter by lifecycle state/status, case-insensitive. Matched against the resource's State/Status property when it has one."),
+			),
+			mcp.WithString("tag",
+				mcp.Description("Filter by tag, in 'Key=Value' form. Only works for types that expose a CloudFormation-style Tags list."),
+			),
+			mcp.WithString("attribute",
+				mcp.Description("Filter by a property, in 'key=value' form with the key in snake_case (e.g. 'engine_version=8.0'). Use view=summary first to discover which keys a type actually returns."),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum rows to return in this page (default 50, max 1000)."),
+			),
+			mcp.WithString("cursor",
+				mcp.Description("Opaque pagination cursor from a previous response's next_cursor; omit for the first page."),
+			),
+		),
+		s.handleListResourcesFallback,
+	)
+
 	s.registerCostTools()
 }
 

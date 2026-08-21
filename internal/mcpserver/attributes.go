@@ -1,7 +1,9 @@
 package mcpserver
 
 import (
+	"strings"
 	"time"
+	"unicode"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 
@@ -237,6 +239,16 @@ func summaryAttributes(r service.ResourceInterface) map[string]any {
 		addTime(m, "last_modified_at", e.LastModifiedTime)
 
 	default:
+		// A resource type with no curated case above still gets attributes if
+		// it can supply its own — which is what the Cloud Control fallback
+		// resources do. Everything downstream (the state/attribute filters,
+		// group_by=state and group_by=attr:<key>, and the summary view) reads
+		// through this one map, so this single case makes the whole feature set
+		// work for every fallback type without any per-type code.
+		if provider, ok := r.(attributeProvider); ok {
+			return genericAttributes(provider.GetAttributes())
+		}
+
 		return nil
 	}
 
@@ -245,6 +257,72 @@ func summaryAttributes(r service.ResourceInterface) map[string]any {
 	}
 
 	return m
+}
+
+// attributeProvider is implemented by entities that carry their own untyped
+// attribute bag (awslib's Cloud Control resources).
+type attributeProvider interface {
+	GetAttributes() map[string]any
+}
+
+// genericAttributes adapts a provider-native property bag to the curated-attribute
+// conventions the rest of the server relies on: snake_case keys, so a caller
+// filters on attribute=instance_type for a fallback type exactly as it would for
+// a curated one, and "State"/"Status" become "state"/"status" so resourceState
+// can lift them.
+//
+// Only top-level scalars are kept. Nested objects and arrays are deliberately
+// dropped: attributes is meant to stay compact enough for the summary view, and
+// viewDetail's raw field already carries the complete entity.
+func genericAttributes(attrs map[string]any) map[string]any {
+	if len(attrs) == 0 {
+		return nil
+	}
+
+	m := make(map[string]any, len(attrs))
+	for key, value := range attrs {
+		// Tags are surfaced as the DTO's own tags field.
+		if key == "Tags" {
+			continue
+		}
+
+		switch value.(type) {
+		case string, bool, float64, int, int32, int64:
+			m[snakeCase(key)] = value
+		}
+	}
+
+	if len(m) == 0 {
+		return nil
+	}
+
+	return m
+}
+
+// snakeCase converts an AWS property name to the snake_case spelling used by the
+// curated attributes ("BucketName" → "bucket_name", "DBInstanceClass" →
+// "db_instance_class", "S3Bucket" → "s3_bucket", "ARN" → "arn").
+func snakeCase(s string) string {
+	runes := []rune(s)
+
+	var b strings.Builder
+	b.Grow(len(runes) + 4)
+
+	for i, r := range runes {
+		if i > 0 && unicode.IsUpper(r) {
+			prevNotUpper := !unicode.IsUpper(runes[i-1])
+			// An acronym ending: the "I" in "DBInstance" starts a new word.
+			acronymEnd := i+1 < len(runes) && unicode.IsLower(runes[i+1])
+
+			if prevNotUpper || acronymEnd {
+				b.WriteRune('_')
+			}
+		}
+
+		b.WriteRune(unicode.ToLower(r))
+	}
+
+	return b.String()
 }
 
 // addStr sets key to v only when v is non-empty, keeping the map compact.

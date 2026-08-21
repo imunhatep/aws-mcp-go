@@ -74,6 +74,20 @@ Both handlers share `Server.fetchResources` (`query.go`): resolve regions (one, 
 Notes:
 - Some SDK structs and `AbstractResource` both declare a `Type` field, so a bare `e.Type` in the switch is ambiguous — qualify it (`e.LoadBalancer.Type`, `e.ResourceRecordSet.Type`).
 - `state`/`tag`/`attribute` filters and `state`/`attr:`/`tag:` group-by dims all read through the curated attributes (`resourceState`, `dimValue`), so adding an entity to `summaryAttributes` automatically makes it filterable/groupable.
+- The `default` branch of the `summaryAttributes` switch is not just `return nil`: a resource that implements `attributeProvider` (`GetAttributes() map[string]any` — awslib's Cloud Control entities do) gets its own property bag adapted by `genericAttributes`. Combined with the point above, that one case is what gives the fallback tool the state/tag/attribute filters and every group-by dimension for free.
+
+### list_resources_fallback (`fallback.go`)
+
+The last-resort lister for types with no awslib repository, answered from the **Cloud Control API** rather than AWS Config. Config was evaluated and rejected: it needs a Configuration Recorder enabled per account and region (absent ⇒ an empty result, not an error), bills per configuration item whether or not anyone queries, would be a net-new SDK dependency (only `configservice/types` is vendored, for the `ResourceType` constants), and does not even model most of the types awslib had to hand-write. Cloud Control needs no enablement, costs nothing extra, returns the full property bag, and was already vendored.
+
+`handleListResourcesFallback` reuses the typed path wholesale: `ResolveFallbackResourceType` → `fetchFallbackResources` → `dedupeFallback` → the same `summaryAttributes`/`filter.matches`/`buildResourceDTO`/`paginate` chain. The only new machinery is `proxy.NewGenericRepoProxyPool` in awslib, whose `GenericRepoProxy` satisfies `RepoProxyInterface`, so `resources.NewProvider` fans out and caches exactly as it does for `list_resources`.
+
+Four things worth keeping:
+
+- **Type resolution is deliberately looser than `ResolveResourceType`** and must stay that way — being limited to the allowlist is the thing this tool exists to escape. It canonicalizes via the URL form and a case-insensitive sweep of the ~530-entry Config vocabulary, then **passes an unknown but well-formed name through verbatim**: Cloud Control's registry is larger than that vocabulary and its `TypeName` is case-sensitive, so there is nothing to canonicalize against. `resourceTypePattern` is only a shape check, so a malformed argument costs no API calls.
+- **`dedupeFallback` is not optional.** `RepoProxyPool.List` collapses global types to one proxy, but it drives that off `cfg.ResourceTypeListGlobal()` — a curated list that by definition cannot cover an arbitrary fallback type. Without dedup, a global type asked for across all regions returns every row once per region and inflates counts. The key is the ARN when there is one (a global resource's ARN has an empty region segment, so it is identical from every region), else account+region+id, which never merges genuinely distinct resources.
+- **`detailed` is tied to `view=detail`**, not exposed as its own argument, because it costs one `GetResource` per resource — some types' LIST handler returns identifiers only (S3 buckets), others return full properties (EC2 instances).
+- **The envelope carries `queried` and `warnings`**, unlike `listResult`. A generic backend has more ways to answer incompletely — a missing per-account IAM grant for the underlying service is logged and dropped by `resources.Provider` (`findResourcesInRegion`), so an under-reported list is indistinguishable from a short one. `queried` at least lets a caller tell "asked 12 accounts, found nothing" from "asked 1". Surfacing the per-client errors themselves needs an awslib change: `Provider` discards them before this repo can see them.
 
 ### Cost Explorer data path
 
