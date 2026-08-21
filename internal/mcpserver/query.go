@@ -39,8 +39,11 @@ func resolveRegions(regionArg string) ([]ptypes.AwsRegion, error) {
 // fetchResources drives the awslib proxy/provider pipeline: it resolves clients
 // for the regions, wires the cache, and reads every resource of the type. Both
 // list_resources and count_resources share this.
-func (s *Server) fetchResources(rt awscfg.ResourceType, regions []ptypes.AwsRegion) ([]service.ResourceInterface, error) {
-	clients, err := s.pool.GetClients(regions...)
+// fetchResources runs the typed resource path over the pool. A non-empty
+// accountID scopes the fan-out to that one account rather than filtering its
+// rows out afterwards — see poolClients.
+func (s *Server) fetchResources(rt awscfg.ResourceType, regions []ptypes.AwsRegion, accountID string) ([]service.ResourceInterface, error) {
+	clients, err := s.poolClients(accountID, regions)
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
