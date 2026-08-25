@@ -73,6 +73,56 @@ func summaryAttributes(r service.ResourceInterface) map[string]any {
 		addStr(m, "state", string(e.State))
 		addBool(m, "is_default", e.IsDefault)
 
+	case ec2.Subnet:
+		addStr(m, "vpc_id", e.GetVpcId())
+		addStr(m, "cidr_block", e.GetCidrBlock())
+		addStr(m, "availability_zone", e.GetAvailabilityZone())
+		addStr(m, "state", string(e.GetState()))
+		m["is_public"] = e.IsPublic()
+		addInt32(m, "available_ip_count", e.AvailableIpAddressCount)
+
+	case ec2.SecurityGroup:
+		addStr(m, "group_name", e.GetGroupName())
+		addStr(m, "vpc_id", e.GetVpcId())
+		addStr(m, "description", e.GetDescription())
+		m["ingress_rules"] = len(e.GetIngressRules())
+		m["egress_rules"] = len(e.GetEgressRules())
+
+	case ec2.VpcEndpoint:
+		addStr(m, "vpc_id", e.GetVpcId())
+		addStr(m, "service_name", e.GetServiceName())
+		addStr(m, "endpoint_type", string(e.GetEndpointType()))
+		addStr(m, "state", string(e.GetState()))
+		m["subnets"] = len(e.GetSubnetIds())
+		m["route_tables"] = len(e.GetRouteTableIds())
+
+	case ec2.RouteTable:
+		addStr(m, "vpc_id", e.GetVpcId())
+		m["is_main"] = e.IsMain()
+		m["routes"] = len(e.GetRoutes())
+		m["subnet_associations"] = len(e.GetSubnetIds())
+
+	case ec2.Address:
+		addStr(m, "public_ip", e.GetPublicIp())
+		addStr(m, "private_ip", e.GetPrivateIpAddress())
+		addStr(m, "allocation_id", e.GetAllocationId())
+		addStr(m, "association_id", e.GetAssociationId())
+		addStr(m, "instance_id", e.GetInstanceId())
+		addStr(m, "network_interface_id", e.GetNetworkInterfaceId())
+		addStr(m, "network_border_group", aws.ToString(e.NetworkBorderGroup))
+		addStr(m, "domain", string(e.Address.Domain))
+		m["associated"] = e.IsAssociated()
+		// DescribeAddresses reports no lifecycle state — an Elastic IP is
+		// either attached to something or idle. Deriving one here is what makes
+		// group_by=state answer the question actually asked of EIPs ("which of
+		// these are billing for nothing"), consistent with how every other type
+		// exposes its state.
+		if e.IsAssociated() {
+			m["state"] = "associated"
+		} else {
+			m["state"] = "unassociated"
+		}
+
 	case rds.DbInstance:
 		addStr(m, "engine", e.GetEngine())
 		addStr(m, "engine_version", e.GetEngineVersion())

@@ -2,7 +2,6 @@ package mcpserver
 
 import (
 	"context"
-	"fmt"
 	"regexp"
 	"strings"
 
@@ -62,22 +61,6 @@ func ResolveFallbackResourceType(raw string) (awscfg.ResourceType, error) {
 	)
 }
 
-// queryScope records what the fallback actually reached out to, so a caller can
-// tell an empty answer ("queried 12 accounts, found nothing") apart from a
-// narrow one ("queried 1 account") — and, via Unreachable, from an incomplete
-// one. A missing IAM grant or an unroutable region no longer degrades silently
-// into fewer rows: those pairs are counted here and named in warnings.
-type queryScope struct {
-	Source   string `json:"source"`
-	Accounts int    `json:"accounts"`
-	Regions  int    `json:"regions"`
-	Detailed bool   `json:"detailed"`
-	// Unreachable counts the account/region pairs that errored or timed out.
-	// Non-zero means the item list is short for a reason other than the estate
-	// being small — the details are named in warnings.
-	Unreachable int `json:"unreachable"`
-}
-
 // fallbackFetch is what one generic query produced: the resources, the scope it
 // covered, and the proxies that could not be reached.
 type fallbackFetch struct {
@@ -120,13 +103,7 @@ func (s *Server) fetchFallbackResources(
 		return out, errors.WithStack(err)
 	}
 
-	accounts := map[ptypes.AwsAccountID]struct{}{}
-	regionSet := map[ptypes.AwsRegion]struct{}{}
-	for _, client := range clients {
-		accounts[client.GetAccountID()] = struct{}{}
-		regionSet[client.GetRegion()] = struct{}{}
-	}
-	out.scope.Accounts, out.scope.Regions = len(accounts), len(regionSet)
+	out.scope.Accounts, out.scope.Regions = clientScope(clients)
 
 	proxyPool := proxy.NewGenericRepoProxyPool(s.ctx, clients, detailed)
 	if s.cache != nil {
@@ -228,6 +205,12 @@ func (s *Server) handleListResourcesFallback(_ context.Context, req mcp.CallTool
 		Int("limit", limit).
 		Msg("[mcpserver.handleListResourcesFallback] listing resources via cloud control")
 
+	// After argument validation, so a bad argument still costs no AWS call. This
+	// matters most here: the fallback is the tool a caller reaches for when a
+	// type has no dedicated implementation, so it is the one that ends up
+	// sweeping every region.
+	regions, regionWarnings := s.narrowRegions(regions, regionArg, req.GetString("account_id", ""))
+
 	fetched, err := s.fetchFallbackResources(rt, regions, detailed, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to list resources", err), nil
@@ -252,33 +235,8 @@ func (s *Server) handleListResourcesFallback(_ context.Context, req mcp.CallTool
 		Total:      page.Total,
 		NextCursor: page.NextCursor,
 		Queried:    fetched.scope,
-		Warnings:   fallbackWarnings(rt, rawType, fetched, duplicates),
+		Warnings:   append(regionWarnings, fallbackWarnings(rt, rawType, fetched, duplicates)...),
 	})
-}
-
-// maxNamedFailures bounds how many unreachable pairs a warning names, so a
-// broadly broken sweep produces a readable sentence rather than 60 of them. The
-// count in the warning is always the true total.
-const maxNamedFailures = 5
-
-// describeFailures renders the unreachable account/region pairs with the reason,
-// which is what makes the warning actionable — "not enabled for this account" and
-// "timed out" call for different responses from the caller.
-func describeFailures(failures []resources.ProxyFailure) string {
-	named := failures
-	suffix := ""
-
-	if len(named) > maxNamedFailures {
-		named = named[:maxNamedFailures]
-		suffix = fmt.Sprintf(" and %d more", len(failures)-maxNamedFailures)
-	}
-
-	parts := make([]string, 0, len(named))
-	for _, f := range named {
-		parts = append(parts, fmt.Sprintf("%s/%s (%v)", f.AccountID, f.Region, f.Err))
-	}
-
-	return strings.Join(parts, "; ") + suffix
 }
 
 // fallbackWarnings states what the caller cannot see from the rows alone. An

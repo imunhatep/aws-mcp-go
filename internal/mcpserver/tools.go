@@ -40,13 +40,13 @@ func (s *Server) registerTools() {
 	s.mcp.AddTool(
 		mcp.NewTool(
 			"list_resources",
-			mcp.WithDescription("List AWS resources of a given type across accounts and regions. Results are cached (default 6h) and paginated. Use list_resource_types for valid resource_type values. Each row carries identity fields (account_id, region, type, arn, id, name, state); the view argument controls richness and filters narrow results server-side. Returns an object {items, count, total, next_cursor}. For 'how many / group by' questions prefer count_resources, which returns tiny aggregates instead of every row."),
+			mcp.WithDescription("List AWS resources of a given type across accounts and regions. Results are cached (default 6h) and paginated. Use list_resource_types for valid resource_type values. Each row carries identity fields (account_id, region, type, arn, id, name, state); the view argument controls richness and filters narrow results server-side. Returns an object {items, count, total, next_cursor, queried, warnings} — queried says how many accounts and regions actually answered and warnings qualifies the result when some could not be reached or were skipped, so read them before treating an empty list as 'none exist'. For 'how many / group by' questions prefer count_resources, which returns tiny aggregates instead of every row."),
 			mcp.WithString("resource_type",
 				mcp.Required(),
 				mcp.Description("Resource type to list, canonical (AWS::EC2::Instance) or URL form (aws_ec2_instance)."),
 			),
 			mcp.WithString("region",
-				mcp.Description("Optional AWS region (e.g. eu-central-1). If omitted, all known regions are queried. Ignored for global resource types."),
+				mcp.Description("Optional AWS region (e.g. eu-central-1). If omitted, every region the reachable accounts have enabled is queried (regions no account opted into are skipped and reported in warnings). Ignored for global resource types."),
 			),
 			mcp.WithString("account_id",
 				mcp.Description("Optional AWS account ID. Scopes the query to that one account — only its credentials are used and only it is called, rather than querying every reachable account and filtering the rows. An account this server cannot reach is an error, not an empty result. Call list_accounts for the reachable IDs."),
@@ -76,7 +76,7 @@ func (s *Server) registerTools() {
 	s.mcp.AddTool(
 		mcp.NewTool(
 			"count_resources",
-			mcp.WithDescription("Aggregate AWS resources of a given type into group counts instead of listing every row — the efficient way to answer 'how many' and 'break down by' questions (by state, instance type, engine, tag, region, account). Returns {total, group_by, buckets:[{group, count}]}, sorted by descending count. Shares the same filters as list_resources."),
+			mcp.WithDescription("Aggregate AWS resources of a given type into group counts instead of listing every row — the efficient way to answer 'how many' and 'break down by' questions (by state, instance type, engine, tag, region, account). Returns {total, group_by, buckets:[{group, count}], queried, warnings}, sorted by descending count; read warnings, since a count has nothing in it to show that a region was unreachable or skipped. Shares the same filters as list_resources."),
 			mcp.WithString("resource_type",
 				mcp.Required(),
 				mcp.Description("Resource type to count, canonical (AWS::EC2::Instance) or URL form (aws_ec2_instance)."),
@@ -85,7 +85,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Comma-separated dimensions to group by: type, state, region, account_id, tag:<key>, attr:<key> (e.g. 'state,attr:instance_type'). Defaults to 'state'."),
 			),
 			mcp.WithString("region",
-				mcp.Description("Optional AWS region. If omitted, all known regions are queried. Ignored for global resource types."),
+				mcp.Description("Optional AWS region. If omitted, every region the reachable accounts have enabled is queried (regions no account opted into are skipped and reported in warnings). Ignored for global resource types."),
 			),
 			mcp.WithString("account_id",
 				mcp.Description("Optional AWS account ID. Scopes the query to that one account rather than counting across every reachable account. An unreachable account is an error, not a zero count."),
@@ -112,7 +112,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Resource type in CloudFormation form (AWS::Kinesis::Stream). Case-insensitive for well-known types; for anything else the exact CloudFormation spelling is required because the Cloud Control type name is case-sensitive. The URL form (aws_kinesis_stream) also works for types list_resource_types knows."),
 			),
 			mcp.WithString("region",
-				mcp.Description("Optional AWS region (e.g. eu-central-1). If omitted, all known regions are queried — pass a region for a global resource type, otherwise it is fetched once per region and the duplicates are collapsed (reported in warnings)."),
+				mcp.Description("Optional AWS region (e.g. eu-central-1). If omitted, every region the reachable accounts have enabled is queried — pass a region for a global resource type, otherwise it is fetched once per region and the duplicates are collapsed (reported in warnings)."),
 			),
 			mcp.WithString("account_id",
 				mcp.Description("Optional AWS account ID. Scopes the query to that one account — only it is called, which also bounds the per-resource detail calls. An unreachable account is an error, not an empty result."),
@@ -222,13 +222,16 @@ func (s *Server) handleListResources(_ context.Context, req mcp.CallToolRequest)
 		Int("limit", limit).
 		Msg("[mcpserver.handleListResources] listing resources")
 
-	items, err := s.fetchResources(rt, regions, req.GetString("account_id", ""))
+	// After argument validation, so a bad argument still costs no AWS call.
+	regions, regionWarnings := s.narrowRegions(regions, regionArg, req.GetString("account_id", ""))
+
+	fetched, err := s.fetchResources(rt, regions, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to list resources", err), nil
 	}
 
-	out := make([]resourceDTO, 0, len(items))
-	for _, r := range items {
+	out := make([]resourceDTO, 0, len(fetched.items))
+	for _, r := range fetched.items {
 		attrs := summaryAttributes(r)
 		if !filter.matches(r, attrs) {
 			continue
@@ -236,7 +239,11 @@ func (s *Server) handleListResources(_ context.Context, req mcp.CallToolRequest)
 		out = append(out, buildResourceDTO(r, attrs, view))
 	}
 
-	return jsonResult(paginate(out, offset, limit))
+	result := paginate(out, offset, limit)
+	result.Queried = fetched.scope
+	result.Warnings = append(regionWarnings, fetched.warnings()...)
+
+	return jsonResult(result)
 }
 
 func (s *Server) handleCountResources(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -268,12 +275,19 @@ func (s *Server) handleCountResources(_ context.Context, req mcp.CallToolRequest
 		Int("regions", len(regions)).
 		Msg("[mcpserver.handleCountResources] counting resources")
 
-	items, err := s.fetchResources(rt, regions, req.GetString("account_id", ""))
+	// After argument validation, so a bad argument still costs no AWS call.
+	regions, regionWarnings := s.narrowRegions(regions, regionArg, req.GetString("account_id", ""))
+
+	fetched, err := s.fetchResources(rt, regions, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to count resources", err), nil
 	}
 
-	return jsonResult(aggregate(items, filter, dims))
+	result := aggregate(fetched.items, filter, dims)
+	result.Queried = fetched.scope
+	result.Warnings = append(regionWarnings, fetched.warnings()...)
+
+	return jsonResult(result)
 }
 
 // jsonResult marshals v to indented JSON and wraps it as a tool text result.

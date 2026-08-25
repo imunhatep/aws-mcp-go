@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	ptypes "github.com/imunhatep/awslib/provider/types"
+	v3 "github.com/imunhatep/awslib/provider/v3"
 	"github.com/imunhatep/awslib/proxy"
 	"github.com/imunhatep/awslib/resources"
 	"github.com/imunhatep/awslib/service"
@@ -36,24 +37,117 @@ func resolveRegions(regionArg string) ([]ptypes.AwsRegion, error) {
 	return []ptypes.AwsRegion{ptypes.AwsRegion(regionArg)}, nil
 }
 
+// queryScope records what a query actually reached out to, so a caller can tell
+// an empty answer ("queried 12 accounts, found nothing") apart from a narrow one
+// ("queried 1 account") — and, via Unreachable, from an incomplete one. A
+// missing IAM grant or an unroutable region no longer degrades silently into
+// fewer rows: those pairs are counted here and named in warnings.
+type queryScope struct {
+	Source   string `json:"source"`
+	Accounts int    `json:"accounts"`
+	Regions  int    `json:"regions"`
+	Detailed bool   `json:"detailed,omitempty"`
+	// Unreachable counts the account/region pairs that errored or timed out.
+	// Non-zero means the item list is short for a reason other than the estate
+	// being small — the details are named in warnings.
+	Unreachable int `json:"unreachable"`
+}
+
+// clientScope counts the distinct accounts and regions a client set covers,
+// which is the "what did we actually ask" half of queryScope.
+func clientScope(clients []*v3.Client) (accounts int, regions int) {
+	accountSet := map[ptypes.AwsAccountID]struct{}{}
+	regionSet := map[ptypes.AwsRegion]struct{}{}
+
+	for _, client := range clients {
+		accountSet[client.GetAccountID()] = struct{}{}
+		regionSet[client.GetRegion()] = struct{}{}
+	}
+
+	return len(accountSet), len(regionSet)
+}
+
+// typedFetch is what one typed query produced: the resources, the scope the
+// fan-out covered, and the proxies that could not be queried.
+type typedFetch struct {
+	items    []service.ResourceInterface
+	scope    queryScope
+	failures []resources.ProxyFailure
+}
+
+// warnings states what the caller cannot see from the rows alone. It is the
+// typed counterpart of fallbackWarnings: an account/region pair that could not
+// be queried contributes no rows, so without this a partial sweep and an empty
+// estate are the same answer.
+func (f typedFetch) warnings() []string {
+	if len(f.failures) == 0 {
+		return nil
+	}
+
+	return []string{errors.Errorf(
+		"incomplete: %d of %d account/region pairs could not be queried, so resources there are missing from this result — %s",
+		len(f.failures),
+		f.scope.Accounts*f.scope.Regions,
+		describeFailures(f.failures),
+	).Error()}
+}
+
 // fetchResources drives the awslib proxy/provider pipeline: it resolves clients
 // for the regions, wires the cache, and reads every resource of the type. Both
 // list_resources and count_resources share this.
-// fetchResources runs the typed resource path over the pool. A non-empty
-// accountID scopes the fan-out to that one account rather than filtering its
-// rows out afterwards — see poolClients.
-func (s *Server) fetchResources(rt awscfg.ResourceType, regions []ptypes.AwsRegion, accountID string) ([]service.ResourceInterface, error) {
+//
+// A non-empty accountID scopes the fan-out to that one account rather than
+// filtering its rows out afterwards — see poolClients.
+func (s *Server) fetchResources(rt awscfg.ResourceType, regions []ptypes.AwsRegion, accountID string) (typedFetch, error) {
+	out := typedFetch{scope: queryScope{Source: "awslib"}}
+
 	clients, err := s.poolClients(accountID, regions)
 	if err != nil {
-		return nil, errors.WithStack(err)
+		return out, errors.WithStack(err)
 	}
+
+	out.scope.Accounts, out.scope.Regions = clientScope(clients)
 
 	proxyPool := proxy.NewRepoProxyPool(s.ctx, clients)
 	if s.cache != nil {
 		proxyPool = proxyPool.WithCache(s.cache)
 	}
 
-	return resources.NewProvider(rt, proxyPool.List(rt)...).Run().Read(), nil
+	// The reader reports the proxies that errored or timed out. Reading only the
+	// resources — as this used to — is what made "no EC2 instances in eu-south-1"
+	// indistinguishable from "eu-south-1 could not be reached".
+	reader := resources.NewProvider(rt, proxyPool.List(rt)...).Run()
+
+	out.items = reader.Read()
+	out.failures = reader.Failures()
+	out.scope.Unreachable = len(out.failures)
+
+	return out, nil
+}
+
+// maxNamedFailures bounds how many unreachable pairs a warning names, so a
+// broadly broken sweep produces a readable sentence rather than 60 of them. The
+// count in the warning is always the true total.
+const maxNamedFailures = 5
+
+// describeFailures renders the unreachable account/region pairs with the reason,
+// which is what makes the warning actionable — "not enabled for this account" and
+// "timed out" call for different responses from the caller.
+func describeFailures(failures []resources.ProxyFailure) string {
+	named := failures
+	suffix := ""
+
+	if len(named) > maxNamedFailures {
+		named = named[:maxNamedFailures]
+		suffix = fmt.Sprintf(" and %d more", len(failures)-maxNamedFailures)
+	}
+
+	parts := make([]string, 0, len(named))
+	for _, f := range named {
+		parts = append(parts, fmt.Sprintf("%s/%s (%v)", f.AccountID, f.Region, f.Err))
+	}
+
+	return strings.Join(parts, "; ") + suffix
 }
 
 // resourceFilter is the set of server-side predicates applied before a resource
@@ -140,12 +234,17 @@ func clampLimit(limit int) int {
 
 // listResult is the paginated envelope returned by list_resources. Count is the
 // rows in this page; Total is the count after filtering across all pages;
-// NextCursor is set only when more rows remain.
+// NextCursor is set only when more rows remain. Queried and Warnings say how
+// much of the estate the answer actually covers — an account/region pair that
+// could not be reached contributes no rows, and silence about that is the
+// difference between "none exist" and "we could not look".
 type listResult struct {
 	Items      []resourceDTO `json:"items"`
 	Count      int           `json:"count"`
 	Total      int           `json:"total"`
 	NextCursor string        `json:"next_cursor,omitempty"`
+	Queried    queryScope    `json:"queried"`
+	Warnings   []string      `json:"warnings,omitempty"`
 }
 
 // dtoSortKey gives a stable ordering so pagination is deterministic across
@@ -176,11 +275,15 @@ type countBucket struct {
 	Count int               `json:"count"`
 }
 
-// countResult is the aggregate envelope returned by count_resources.
+// countResult is the aggregate envelope returned by count_resources. It carries
+// the same Queried/Warnings qualification as listResult, and needs it more: a
+// count is a single number with nothing in it to hint that a region is missing.
 type countResult struct {
-	Total   int           `json:"total"`
-	GroupBy []string      `json:"group_by"`
-	Buckets []countBucket `json:"buckets"`
+	Total    int           `json:"total"`
+	GroupBy  []string      `json:"group_by"`
+	Buckets  []countBucket `json:"buckets"`
+	Queried  queryScope    `json:"queried"`
+	Warnings []string      `json:"warnings,omitempty"`
 }
 
 // parseGroupBy splits and validates the comma-separated group_by dimensions.
