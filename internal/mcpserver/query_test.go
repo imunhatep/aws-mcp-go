@@ -9,8 +9,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	ptypes "github.com/imunhatep/awslib/provider/types"
+	"github.com/imunhatep/awslib/resources"
 	"github.com/imunhatep/awslib/service"
 	"github.com/imunhatep/awslib/service/ec2"
+
+	"github.com/imunhatep/aws-mcp-go/pkg/errors"
 )
 
 // instance builds an ec2.Instance test entity with the given name, type and state.
@@ -172,4 +175,31 @@ func TestParseView(t *testing.T) {
 
 	_, ok = parseView("bogus")
 	assert.False(t, ok)
+}
+
+// TestTypedFetchWarnings pins the signal that was missing from list_resources
+// and count_resources: a region that could not be queried contributes no rows,
+// and without this warning that is indistinguishable from a region that holds
+// nothing.
+func TestTypedFetchWarnings(t *testing.T) {
+	t.Run("silent when everything answered", func(t *testing.T) {
+		fetched := typedFetch{scope: queryScope{Accounts: 3, Regions: 10}}
+
+		assert.Nil(t, fetched.warnings(), "a complete sweep needs no qualification")
+	})
+
+	t.Run("names the unreachable pairs", func(t *testing.T) {
+		fetched := typedFetch{
+			scope: queryScope{Accounts: 2, Regions: 3},
+			failures: []resources.ProxyFailure{
+				{AccountID: "111111111111", Region: "me-south-1", Err: errors.New("region not enabled")},
+			},
+		}
+
+		got := fetched.warnings()
+		require.Len(t, got, 1)
+		assert.Contains(t, got[0], "1 of 6 account/region pairs could not be queried")
+		assert.Contains(t, got[0], "111111111111/me-south-1")
+		assert.Contains(t, got[0], "region not enabled", "the reason is what makes the warning actionable")
+	})
 }

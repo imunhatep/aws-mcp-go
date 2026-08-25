@@ -62,19 +62,21 @@ func (s *Server) poolClients(accountID string, regions []ptypes.AwsRegion) ([]*v
 // Server wires the AWS client pool and resource cache into an MCP server that
 // exposes tools for listing AWS resources.
 type Server struct {
-	ctx   context.Context
-	pool  ClientPool
-	cache *cache.DataCache
-	mcp   *server.MCPServer
+	ctx     context.Context
+	pool    ClientPool
+	cache   *cache.DataCache
+	regions *regionCache
+	mcp     *server.MCPServer
 }
 
 // NewServer builds an MCP server around the given client pool. dc may be nil to
 // disable caching.
 func NewServer(ctx context.Context, pool ClientPool, dc *cache.DataCache) *Server {
 	s := &Server{
-		ctx:   ctx,
-		pool:  pool,
-		cache: dc,
+		ctx:     ctx,
+		pool:    pool,
+		cache:   dc,
+		regions: newRegionCache(DefaultCacheTTL),
 	}
 
 	s.mcp = server.NewMCPServer(
@@ -86,6 +88,16 @@ func NewServer(ctx context.Context, pool ClientPool, dc *cache.DataCache) *Serve
 	)
 
 	s.registerTools()
+
+	return s
+}
+
+// WithRegionTTL sets how long an account's enabled-region list is trusted. It
+// tracks the resource cache TTL for the same reason the client-failure cache
+// does: both answer "has anything changed since we last looked", and enabling a
+// region is a deliberate, rare act. A non-positive value keeps the default.
+func (s *Server) WithRegionTTL(ttl time.Duration) *Server {
+	s.regions = newRegionCache(ttl)
 
 	return s
 }

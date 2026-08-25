@@ -91,7 +91,9 @@ func (c ServeCommand) run(ctx context.Context, cmd *cli.Command) error {
 		return err
 	}
 
-	srv := mcpserver.NewServer(ctx, pool, dc)
+	// The enabled-region lookup is cached on the same TTL as client failures:
+	// both record something about an account that only a deliberate act changes.
+	srv := mcpserver.NewServer(ctx, pool, dc).WithRegionTTL(failureTTL(cfg))
 
 	return srv.ServeHTTP(ctx, cfg.Addr)
 }
