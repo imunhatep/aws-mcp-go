@@ -18,6 +18,8 @@
 | `--profiles` | `MCP_AWS_PROFILES` | | Comma-separated AWS shared-config profiles to serve, one account each (excludes the assume-role flags) |
 | `--assume-role` | | `false` | Auto-discover assumable roles from the current IAM role |
 | `--assume-role-arns` | `MCP_ASSUME_ROLE_ARNS` | | Explicit assumable role ARNs (implies assume-role mode) |
+| `--sso-auto-login` | `MCP_SSO_AUTO_LOGIN` | `true` | On an expired-beyond-refresh SSO session, start a device-authorization flow and return its URL and user code in the failing tool result |
+| `--sso-open-browser` | `MCP_SSO_OPEN_BROWSER` | `true` | Also open that URL locally; best-effort, skipped in a container |
 | `--verbose` / `-v` | `AWS_MCP_VERBOSE`, `LOG_LEVEL` | `3` | Log verbosity: `0`=fatal … `5`=trace (global flag) |
 
 The authentication flags are covered in [authentication.md](authentication.md).

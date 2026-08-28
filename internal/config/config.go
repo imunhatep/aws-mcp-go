@@ -28,6 +28,13 @@ type Config struct {
 	// Profiles is a comma-separated list of AWS shared-config profile names;
 	// when set, each profile is served as its own account.
 	Profiles string
+	// SSOAutoLogin lets the server start an SSO device-authorization flow itself
+	// when a profile's session has expired beyond refresh, and report the
+	// verification URL and user code in the failing tool's result.
+	SSOAutoLogin bool
+	// SSOOpenBrowser additionally opens that URL locally. Best-effort and
+	// skipped in a container, where there is no browser to open.
+	SSOOpenBrowser bool
 }
 
 // FromCommand builds a Config from the serve command's flags.
@@ -40,6 +47,8 @@ func FromCommand(cmd *cli.Command) *Config {
 		AssumeRole:     cmd.Bool("assume-role"),
 		AssumeRoleArns: cmd.String("assume-role-arns"),
 		Profiles:       cmd.String("profiles"),
+		SSOAutoLogin:   cmd.Bool("sso-auto-login"),
+		SSOOpenBrowser: cmd.Bool("sso-open-browser"),
 	}
 }
 

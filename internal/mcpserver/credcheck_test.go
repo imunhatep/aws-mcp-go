@@ -284,3 +284,90 @@ sso_role_name = readonly
 	assert.Contains(t, err.Error(), "malformed SSO token cache")
 	assert.Contains(t, err.Error(), "aws sso login --sso-session evo")
 }
+
+// writeTokenCacheDoc writes an arbitrary token cache document for the session,
+// returning its path. Used to model the difference between a token that can
+// refresh itself and one that cannot.
+func writeTokenCacheDoc(t *testing.T, session string, doc map[string]any) string {
+	t.Helper()
+
+	t.Setenv("HOME", t.TempDir())
+
+	path, err := ssoTokenPath(ProfileAuth{SSOSession: session})
+	require.NoError(t, err)
+
+	require.NoError(t, writeSSOTokenCache(path, doc))
+
+	return path
+}
+
+// TestPreflightAcceptsExpiredButRefreshableToken: an expired *access* token is
+// normal — the SDK trades the refresh token for a new one on first use, with no
+// human involved. Treating it as fatal was demanding a browser approval nobody
+// needed, and taking the server down to ask for it.
+func TestPreflightAcceptsExpiredButRefreshableToken(t *testing.T) {
+	writeSharedConfig(t, `
+[sso-session evo]
+sso_start_url = https://example.awsapps.com/start
+sso_region = eu-central-1
+
+[profile dev]
+sso_session = evo
+sso_account_id = 111111111111
+sso_role_name = readonly
+`)
+	writeTokenCacheDoc(t, "evo", map[string]any{
+		"accessToken":  "stale",
+		"expiresAt":    time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+		"refreshToken": "refresh",
+		"clientId":     "id",
+		"clientSecret": "secret",
+	})
+
+	auth, err := PreflightProfile(context.Background(), "dev")
+	require.NoError(t, err)
+
+	assert.Equal(t, "eu-central-1", auth.SSORegion)
+	assert.Equal(t, "https://example.awsapps.com/start", auth.SSOStartURL)
+
+	status, err := CheckSSOToken(auth)
+	require.NoError(t, err)
+
+	assert.True(t, status.Expired())
+	assert.True(t, status.Refreshable)
+}
+
+// TestIsCredentialFailure guards the gate on starting a login: only failures a
+// login actually fixes may send a user to a browser.
+func TestIsCredentialFailure(t *testing.T) {
+	assert.True(t, IsCredentialFailure(errors.New("failed to refresh cached credentials, cached SSO token is expired")))
+	assert.True(t, IsCredentialFailure(errors.New("operation error SSO: GetRoleCredentials, InvalidGrantException")))
+	assert.True(t, IsCredentialFailure(errors.New(`aws profile "dev" has no cached SSO token`)))
+
+	assert.False(t, IsCredentialFailure(nil))
+	assert.False(t, IsCredentialFailure(errors.New("AccessDenied: not authorized to perform ec2:DescribeInstances")))
+	assert.False(t, IsCredentialFailure(errors.New("could not connect to the endpoint URL")))
+}
+
+// TestCheckSSOTokenReportsWritabilityBeforeFirstLogin: with no token yet, the
+// interesting question is whether one can be *written* — a read-only mount is the
+// reason a login would fail, and reporting the fresh cache dir as unwritable would
+// point at the wrong problem.
+func TestCheckSSOTokenReportsWritabilityBeforeFirstLogin(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	status, err := CheckSSOToken(ProfileAuth{SSOSession: "evo", SSOStartURL: "https://example.awsapps.com/start"})
+	require.NoError(t, err)
+
+	assert.False(t, status.Found)
+	assert.True(t, status.CacheWritable, "the cache directory does not exist yet but can be created")
+
+	require.NoError(t, os.Chmod(home, 0o500))
+	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
+
+	status, err = CheckSSOToken(ProfileAuth{SSOSession: "evo", SSOStartURL: "https://example.awsapps.com/start"})
+	require.NoError(t, err)
+
+	assert.False(t, status.CacheWritable, "a read-only home cannot hold a new token cache")
+}

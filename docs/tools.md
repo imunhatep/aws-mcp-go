@@ -8,9 +8,21 @@
 | `list_resources` | `resource_type` (required), `region`, `account_id`, `view`, `state`, `tag`, `attribute`, `limit`, `cursor` | List resources of a type across accounts/regions (paginated) |
 | `count_resources` | `resource_type` (required), `group_by`, `region`, `account_id`, `state`, `tag`, `attribute` | Aggregate resources into group counts |
 | `list_resources_fallback` | `resource_type` (required), `region`, `account_id`, `view`, `state`, `tag`, `attribute`, `limit`, `cursor` | Last resort for types `list_resources` does not support, via the Cloud Control API |
+| `aws_auth_status` | `profile` | Credential state per profile: mechanism, account, usability, SSO token expiry, logins in progress. Local files only — answers while AWS is unusable |
+| `aws_sso_login` | `profile` | Starts (or picks up) an SSO device-authorization flow and returns the verification URL and user code for the user to approve |
+| `list_savings_plans` | `plan_type`, `state`, `region`, `instance_family`, `expiring_within_days`, `account_id`, `limit` | Purchased Savings Plans with commitment, term and time remaining. Defaults to active plans; read live, not cached |
+| `list_savings_plan_rates` | `region` (required), `instance_type` or `instance_family` (one required), `product`, `plan_type`, `payment_option`, `term`, `product_description`, `tenancy`, `account_id`, `limit` | Published Savings Plan rates — what a commitment would cost |
 
 The Cost Explorer tools are documented separately in
-[cost-explorer.md](cost-explorer.md).
+[cost-explorer.md](cost-explorer.md), the Savings Plans tools in
+[savings-plans.md](savings-plans.md), and the two authentication tools in
+[authentication.md](authentication.md#automatic-sso-login-device-flow).
+
+When a tool fails because AWS is unauthenticated, it says so — naming the profile
+and the command that fixes it, plus a verification URL and user code when the
+server started a login itself. The server stays up either way, and picks up a
+fresh login on the next call; an empty result is never used to stand in for a
+credential failure.
 
 `resource_type` accepts either the canonical form (`AWS::EC2::Instance`) or the
 URL form (`aws_ec2_instance`). When `region` is omitted, all known regions are

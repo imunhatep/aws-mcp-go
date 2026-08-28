@@ -61,6 +61,9 @@ question you ask.
 | `get_cost_and_usage` | "What did we spend on …" — grouped, filtered, multi-account |
 | `get_cost_forecast` | "What will we spend …" |
 | `list_cost_dimensions`, `list_cost_dimension_values` | The cost vocabulary, and the exact strings filters need |
+| `aws_auth_status`, `aws_sso_login` | "why can't you see my account" — credential state, and an SSO login the agent can walk the user through |
+| `list_savings_plans` | "what are we committed to" — purchased Savings Plans, hourly commitment, terms, what expires next |
+| `list_savings_plan_rates` | "what would a commitment cost" — published Savings Plan rates per region, term and payment option |
 
 Curated coverage spans EC2, RDS, ELB, ECS, EKS, Lambda, DynamoDB, S3, Route53,
 Secrets Manager, EFS, SQS, SNS, IAM, Auto Scaling and CloudFront — call
@@ -83,6 +86,7 @@ so prefer `list_resources` whenever the type is supported. See
 | [Running in a container](docs/container.md) | Multi-account AWS SSO with podman, image builds, cache volumes, troubleshooting |
 | [Resource tools](docs/tools.md) | `list_resources` views/filters/pagination, `count_resources` aggregation, `list_resources_fallback` for unsupported types |
 | [Cost Explorer](docs/cost-explorer.md) | Periods, groupings, filter shape, response layout, per-request billing |
+| [Savings Plans](docs/savings-plans.md) | Purchased plans and offering rates: why region is a filter, the defaults, the summary |
 | [Configuration](docs/configuration.md) | Commands, flags and environment variables, caching, client config |
 | [Development](docs/development.md) | Building, the awslib dependency, make targets, CI and releases |
 
@@ -91,6 +95,7 @@ so prefer `list_resources` whenever the type is supported. See
 Go 1.25+ to build, and AWS credentials the standard chain can resolve — an SSO
 session, a profile, environment variables or an instance role. Read-only IAM
 permissions are enough (`ce:GetCostAndUsage` and friends for the cost tools;
-`cloudcontrol:ListResources` / `GetResource` plus the target service's own read
-permission for `list_resources_fallback`, which a broad `ReadOnlyAccess`-style
-policy already covers).
+`savingsplans:DescribeSavingsPlans` / `DescribeSavingsPlansOfferingRates` for the
+Savings Plans tools; `cloudcontrol:ListResources` / `GetResource` plus the target
+service's own read permission for `list_resources_fallback`, which a broad
+`ReadOnlyAccess`-style policy already covers).

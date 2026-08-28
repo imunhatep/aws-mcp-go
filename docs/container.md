@@ -72,8 +72,9 @@ podman run --rm -d \
   serve --profiles dev,prod
 ```
 
-**4. Check the startup log.** Each profile is resolved and its token lifetime
-reported before the server listens:
+**4. Check the startup log.** Each profile's token lifetime is reported before the
+server listens; the identities themselves resolve immediately afterwards, in the
+background, since nothing about credentials may hold up the listener:
 
 ```sh
 podman logs aws-mcp
@@ -81,20 +82,21 @@ podman logs aws-mcp
 ```
 INF [serve] using aws shared-config profiles profiles=["dev","prod"]
 INF [mcpserver.PreflightProfile] sso token cached profile=dev sso_session=my-session token_valid_for=7h58m0s
+INF [mcpserver.ServeHTTP] starting MCP streamable-HTTP server addr=0.0.0.0:3040 endpoint=/mcp
 INF [ProfilePool] profile resolved profile=dev account=111111111111 arn=arn:aws:sts::111111111111:assumed-role/…
 INF [ProfilePool] profile resolved profile=prod account=222222222222 arn=arn:aws:sts::222222222222:assumed-role/…
-INF [mcpserver.ServeHTTP] starting MCP streamable-HTTP server addr=0.0.0.0:3040 endpoint=/mcp
 ```
 
 Then `list_accounts` returns both account IDs, and every resource and cost tool
 spans them.
 
-Four things worth knowing:
+Five things worth knowing:
 
 - **Mount the token cache read-write.** On refresh the SDK writes a temp file
   into the cache directory and renames it over the token, so a `:ro` mount works
-  until the token expires and then fails every call. Startup warns when the
-  directory is not writable.
+  until the token expires and then fails every call. The same mount is where the
+  server writes the token when it runs an SSO login itself, so read-only also
+  disables that. Startup warns when the directory is not writable.
 - **Mount `config` and `sso/cache` separately**, not all of `~/.aws`, so the
   container never sees `~/.aws/credentials`.
 - **File ownership.** The image runs as uid 65532; if that user cannot write the
@@ -103,6 +105,13 @@ Four things worth knowing:
 - **Re-login needs no restart.** When the SSO session finally expires, run
   `aws sso login --sso-session my-session` on the host again — the running
   container re-reads the token file on its next refresh and carries on.
+- **The container can run the login itself.** With `--sso-auto-login` (the
+  default), a tool call that hits an expired session starts the device flow
+  in-process and returns the verification URL and user code to the calling agent,
+  which relays them to you; approving in a browser on any machine completes it and
+  the token lands in the mounted cache. No `aws` CLI, shell or browser is needed
+  in the image — only egress to `oidc.<sso_region>.amazonaws.com`. Browser opening
+  is skipped automatically inside a container.
 
 Profiles spread across *different* `sso_session` blocks work too; each session
 needs its own `aws sso login`, and all their tokens live in the same mounted
@@ -124,9 +133,9 @@ podman run --rm -p 127.0.0.1:3040:3040 \
 ## `credential_process` profiles do not work in the image
 
 The image has **no shell**, so a mounted profile that resolves credentials
-through `credential_process` (aws-sso-cli, aws-vault, …) fails at startup with
-`error in credential_process: exec: "sh": executable file not found`. Startup
-warns as soon as it sees such a profile.
+through `credential_process` (aws-sso-cli, aws-vault, …) fails with
+`error in credential_process: exec: "sh": executable file not found` on the first
+tool call that needs it. Startup warns as soon as it sees such a profile.
 
 Converting those profiles to native `sso_session` is the durable fix. As a
 stopgap, resolve them on the host and pass the result as environment variables:
@@ -164,13 +173,13 @@ podman run --rm -d --name aws-mcp \
 
 ## Troubleshooting
 
-The startup checks name the cause; these are the ones specific to running in a
-container:
+The preflight checks and the failing tool's own error name the cause; these are
+the ones specific to running in a container:
 
 | Symptom in `podman logs` | Cause and fix |
 |--------------------------|---------------|
 | `has no cached SSO token (…); run: aws sso login --sso-session …` | The cache mount is missing or points at the wrong path, or no login has happened. Check `-v ~/.aws/sso/cache:/home/nonroot/.aws/sso/cache` |
-| `has an expired SSO token (expired …)` | Re-run `aws sso login` on the host; no need to rebuild or restart anything else |
+| `has an expired SSO token that cannot be refreshed (…)` | The refresh token is gone too. Re-run `aws sso login` on the host, or let the server do it: with `--sso-auto-login` the failing tool result carries a verification URL and code. Either way no restart is needed |
 | `sso token cache is not writable; refresh will fail` | The cache is mounted `:ro`, or uid 65532 cannot write it — mount `:rw` and add `--userns=keep-id:uid=65532,gid=65532` |
 | `is not defined in ~/.aws/config` | The config mount is missing, or the profile only exists in a file that was not mounted |
 | `credential_process could not be executed … no shell` | A `credential_process` profile in a distroless image — convert it to `sso_session` |

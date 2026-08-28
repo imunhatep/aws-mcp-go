@@ -6,7 +6,7 @@ dependency); the module targets the Go 1.26 toolchain.
 ## The awslib dependency
 
 This module consumes `awslib` as a normal tagged dependency
-(`github.com/imunhatep/awslib v0.5.0`), resolved from the module proxy — no local
+(`github.com/imunhatep/awslib v0.9.0`), resolved from the module proxy — no local
 checkout or `replace` directive is required to build. To test an unreleased
 `awslib` change, add a `replace` locally (`go mod edit -replace
 github.com/imunhatep/awslib=../pkgs/awslib`) and drop it again before committing.

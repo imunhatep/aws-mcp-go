@@ -62,6 +62,18 @@ func (c ServeCommand) Command() *cli.Command {
 				Usage:   "comma-separated assumable role ARNs (e.g. arn:aws:iam::111:role/r,arn:aws:iam::222:role/r or accountID=arn); enables cross-account mode and overrides auto-discovery",
 				Sources: cli.EnvVars("MCP_ASSUME_ROLE_ARNS"),
 			},
+			&cli.BoolFlag{
+				Name:    "sso-auto-login",
+				Usage:   "when an AWS SSO session has expired beyond refresh, start a device-authorization flow in-process and return the verification URL and user code in the failing tool's result",
+				Value:   true,
+				Sources: cli.EnvVars("MCP_SSO_AUTO_LOGIN"),
+			},
+			&cli.BoolFlag{
+				Name:    "sso-open-browser",
+				Usage:   "also open the SSO verification URL in a local browser; best-effort, and skipped inside a container",
+				Value:   true,
+				Sources: cli.EnvVars("MCP_SSO_OPEN_BROWSER"),
+			},
 			&cli.StringFlag{
 				Name:    "profiles",
 				Usage:   "comma-separated AWS shared-config profile names to serve (e.g. dev,prod); each profile becomes one account in the pool. Cannot be combined with the assume-role flags",
@@ -81,7 +93,9 @@ func (c ServeCommand) run(ctx context.Context, cmd *cli.Command) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := buildClientPool(ctx, cfg)
+	login := mcpserver.NewSSOLoginManager(ctx, cfg.SSOAutoLogin, cfg.SSOOpenBrowser)
+
+	pool, err := buildClientPool(ctx, cfg, login)
 	if err != nil {
 		return err
 	}
@@ -93,17 +107,72 @@ func (c ServeCommand) run(ctx context.Context, cmd *cli.Command) error {
 
 	// The enabled-region lookup is cached on the same TTL as client failures:
 	// both record something about an account that only a deliberate act changes.
-	srv := mcpserver.NewServer(ctx, pool, dc).WithRegionTTL(failureTTL(cfg))
+	srv := mcpserver.NewServer(ctx, pool, dc).
+		WithRegionTTL(failureTTL(cfg)).
+		WithAuth(login, profileNames(cfg))
+
+	// Resolve credentials in the background rather than on the way in. A failure
+	// here is a tool-call error, never a startup abort: the server has to stay up
+	// and tell the calling agent that AWS is unauthenticated — with the login
+	// URL, when auto-login is on — instead of exiting and leaving it with a dead
+	// endpoint.
+	go warmPool(pool)
 
 	return srv.ServeHTTP(ctx, cfg.Addr)
 }
 
+// warmPool exercises the credentials once at startup so the log shows the active
+// identity, or the login instructions, immediately.
+func warmPool(pool mcpserver.ClientPool) {
+	lazy, ok := pool.(*mcpserver.LazyPool)
+	if ok {
+		if err := lazy.Warm(); err != nil {
+			log.Warn().Err(err).Msg("[serve] aws credentials are not usable yet; the server is running and will retry on the next tool call")
+		}
+
+		return
+	}
+
+	// Profile mode answers this from the shared config (sso_account_id), so it is
+	// not a credential check — it just makes the served accounts visible in the
+	// log without exercising any profile the caller may never ask about.
+	ids, err := pool.ListAccountIDs()
+	if err != nil {
+		log.Warn().Err(err).Msg("[serve] no aws profile could be authenticated yet; the server is running and will retry on the next tool call")
+
+		return
+	}
+
+	accounts := make([]string, 0, len(ids))
+	for _, id := range ids {
+		accounts = append(accounts, id.String())
+	}
+
+	log.Info().Strs("accounts", accounts).Msg("[serve] aws accounts served")
+}
+
+// profileNames is the configured profile list, or a single empty name standing
+// for the default credential chain.
+func profileNames(cfg *config.Config) []string {
+	if cfg.Profiles == "" {
+		return []string{""}
+	}
+
+	profiles, err := parseProfiles(cfg.Profiles)
+	if err != nil {
+		return []string{""}
+	}
+
+	return profiles
+}
+
 // logCallerIdentity resolves the default (base) credentials' STS caller
 // identity and logs the account, ARN and user ID. It returns an error if the
-// identity cannot be resolved, so startup aborts with a clear message when the
-// AWS credential chain is missing or invalid. In assume-role mode this reports
+// identity cannot be resolved, so the pool build fails with a clear message when
+// the AWS credential chain is missing or invalid — and, with auto-login on, with
+// the SSO verification URL to hand to the user. In assume-role mode this reports
 // the base principal that role assumption chains off of.
-func logCallerIdentity(ctx context.Context, builder *v3.ClientBuilder) error {
+func logCallerIdentity(ctx context.Context, builder *v3.ClientBuilder, login *mcpserver.SSOLoginManager) error {
 	// Inspect whichever profile the default chain will land on, so an expired
 	// SSO login or an unusable credential_process is reported with the fix
 	// rather than as an opaque SDK error. A failure here is not fatal on its
@@ -115,12 +184,12 @@ func logCallerIdentity(ctx context.Context, builder *v3.ClientBuilder) error {
 
 	client, err := builder.DefaultClient()
 	if err != nil {
-		return mcpserver.ExplainCredentialError(auth, errors.Wrap(err, "resolving AWS credentials failed; check your AWS credential chain (profile / SSO / env / IMDS)"))
+		return login.Explain(auth, errors.Wrap(err, "resolving AWS credentials failed; check your AWS credential chain (profile / SSO / env / IMDS)"))
 	}
 
 	id, err := client.GetCallerIdentity(ctx)
 	if err != nil {
-		return mcpserver.ExplainCredentialError(auth, errors.Wrap(err, "STS GetCallerIdentity failed; AWS credentials are missing, expired or invalid"))
+		return login.Explain(auth, errors.Wrap(err, "STS GetCallerIdentity failed; AWS credentials are missing, expired or invalid"))
 	}
 
 	log.Info().
@@ -154,7 +223,13 @@ func failureTTL(cfg *config.Config) time.Duration {
 // buildClientPool assembles the provider client pool for the configured
 // authentication mode: multi-profile (--profiles), cross-account assume-role,
 // or local / single-account via the default credential chain.
-func buildClientPool(ctx context.Context, cfg *config.Config) (mcpserver.ClientPool, error) {
+//
+// It returns errors only for things the operator got wrong in the flags — a
+// malformed role ARN, a duplicated profile — because those cannot fix themselves
+// and a server that starts with them would only fail later, identically, forever.
+// Anything that depends on AWS or on credentials is deferred to first use
+// instead, so an expired SSO session cannot keep the server from starting.
+func buildClientPool(ctx context.Context, cfg *config.Config, login *mcpserver.SSOLoginManager) (mcpserver.ClientPool, error) {
 	// Multi-profile mode: one account per named AWS shared-config profile. It
 	// does not use the default credential chain at all, so the default builder
 	// is never constructed here — NewProfilePool validates each profile's
@@ -167,7 +242,7 @@ func buildClientPool(ctx context.Context, cfg *config.Config) (mcpserver.ClientP
 
 		log.Info().Strs("profiles", profiles).Msg("[serve] using aws shared-config profiles")
 
-		pool, err := mcpserver.NewProfilePool(ctx, profiles)
+		pool, err := mcpserver.NewProfilePool(ctx, profiles, login)
 		if err != nil {
 			return nil, err
 		}
@@ -175,53 +250,66 @@ func buildClientPool(ctx context.Context, cfg *config.Config) (mcpserver.ClientP
 		return pool.WithFailureTTL(failureTTL(cfg)), nil
 	}
 
-	providers, err := v3.DefaultAwsClientProviders()
-	if err != nil {
-		return nil, errors.WithStack(err)
-	}
-
-	builder := v3.NewClientBuilder(ctx, providers...)
-
-	// Validate credentials up front and make the active identity visible, so a
-	// misconfigured or missing AWS credential chain fails loudly at startup
-	// rather than on the first tool call.
-	if err := logCallerIdentity(ctx, builder); err != nil {
-		return nil, err
-	}
-
-	// Local / single-account mode: default credentials (AWS SSO, env, IMDS).
-	if !cfg.AssumeRole && cfg.AssumeRoleArns == "" {
-		log.Info().Msg("[serve] using local credentials (aws profile / sso / env)")
-		return provider.NewClientPool(ctx, builder).WithFailureTTL(failureTTL(cfg)), nil
-	}
-
-	// Cross-account assume-role mode.
-	var roles map[ptypes.AwsAccountID]ptypes.RoleArn
+	// Parsed eagerly: a malformed ARN is an operator error, and deferring it
+	// would only report it on the first tool call.
+	var explicitRoles map[ptypes.AwsAccountID]ptypes.RoleArn
 
 	if cfg.AssumeRoleArns != "" {
-		roles, err = parseRoleArns(cfg.AssumeRoleArns)
+		roles, err := parseRoleArns(cfg.AssumeRoleArns)
 		if err != nil {
 			return nil, err
 		}
-		log.Info().Int("roles", len(roles)).Msg("[serve] using explicit assumable roles")
-	} else {
-		defaultClient, err := builder.DefaultClient()
+
+		explicitRoles = roles
+	}
+
+	return mcpserver.NewLazyPool(ctx, func(ctx context.Context) (mcpserver.ClientPool, error) {
+		providers, err := v3.DefaultAwsClientProviders()
 		if err != nil {
 			return nil, errors.WithStack(err)
 		}
 
-		roles, err = provider.DiscoverAssumableRolesFromCurrentRole(ctx, defaultClient)
-		if err != nil {
-			return nil, errors.WithStack(err)
+		builder := v3.NewClientBuilder(ctx, providers...)
+
+		// Resolve the identity first, so the active principal is logged and a
+		// broken credential chain is reported as itself rather than as a
+		// downstream listing failure.
+		if err := logCallerIdentity(ctx, builder, login); err != nil {
+			return nil, err
 		}
-		log.Info().Int("roles", len(roles)).Msg("[serve] auto-discovered assumable roles from current IAM role")
-	}
 
-	if len(roles) == 0 {
-		return nil, errors.New("assume-role mode enabled but no assumable roles were found")
-	}
+		// Local / single-account mode: default credentials (AWS SSO, env, IMDS).
+		if !cfg.AssumeRole && cfg.AssumeRoleArns == "" {
+			log.Info().Msg("[serve] using local credentials (aws profile / sso / env)")
 
-	return v3.NewClientPool(ctx, builder, roles).WithFailureTTL(failureTTL(cfg)), nil
+			return provider.NewClientPool(ctx, builder).WithFailureTTL(failureTTL(cfg)), nil
+		}
+
+		// Cross-account assume-role mode.
+		roles := explicitRoles
+
+		if len(roles) > 0 {
+			log.Info().Int("roles", len(roles)).Msg("[serve] using explicit assumable roles")
+		} else {
+			defaultClient, err := builder.DefaultClient()
+			if err != nil {
+				return nil, errors.WithStack(err)
+			}
+
+			roles, err = provider.DiscoverAssumableRolesFromCurrentRole(ctx, defaultClient)
+			if err != nil {
+				return nil, errors.WithStack(err)
+			}
+
+			log.Info().Int("roles", len(roles)).Msg("[serve] auto-discovered assumable roles from current IAM role")
+		}
+
+		if len(roles) == 0 {
+			return nil, errors.New("assume-role mode enabled but no assumable roles were found")
+		}
+
+		return v3.NewClientPool(ctx, builder, roles).WithFailureTTL(failureTTL(cfg)), nil
+	}), nil
 }
 
 // parseProfiles parses a comma-separated list of AWS shared-config profile

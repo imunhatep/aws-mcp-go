@@ -32,11 +32,46 @@ type ProfileAuth struct {
 	// SSOAccountID / SSORoleName are set for any SSO profile.
 	SSOAccountID string
 	SSORoleName  string
-	// SSOStartURL is set for a legacy SSO profile (sso_start_url on the profile
-	// itself, no sso_session), which the SDK cannot refresh.
+	// SSOStartURL and SSORegion identify the IAM Identity Center instance,
+	// whether they come from the [sso-session] block or (legacy form) from the
+	// profile itself. Both are what the device-authorization flow logs in
+	// against, so they are always populated for an SSO profile.
 	SSOStartURL string
+	SSORegion   string
+	// SSORegistrationScopes is the sso_registration_scopes of the sso-session,
+	// if it declares any; the OIDC client is registered with these.
+	SSORegistrationScopes []string
 	// CredentialProcess is the configured credential_process command, if any.
 	CredentialProcess string
+}
+
+// Label is the profile name for messages, naming the default chain explicitly
+// rather than showing an empty string.
+func (a ProfileAuth) Label() string {
+	if a.Name == "" {
+		return "(default chain)"
+	}
+
+	return a.Name
+}
+
+// SSOCacheKey is what the SDK hashes to find the cached token: the sso_session
+// name, or the start URL for a legacy profile.
+func (a ProfileAuth) SSOCacheKey() string {
+	if a.SSOSession != "" {
+		return a.SSOSession
+	}
+
+	return a.SSOStartURL
+}
+
+// SSOSessionKeyName is a display name for the SSO session behind this profile.
+func (a ProfileAuth) SSOSessionKeyName() string {
+	if a.SSOSession != "" {
+		return a.SSOSession
+	}
+
+	return a.SSOStartURL
 }
 
 // IsSSO reports whether the profile resolves credentials through AWS SSO.
@@ -75,6 +110,11 @@ type SSOTokenStatus struct {
 	// refresh — it writes a temp file into the cache directory and renames it,
 	// so the *directory* must be writable, not just the file.
 	CacheWritable bool
+	// Refreshable reports whether the cache holds a refresh token and its client
+	// registration. An expired access token with those present is not a problem:
+	// the SDK trades the refresh token for a new one on next use, with no human
+	// involved. Without them, expiry means a fresh browser approval.
+	Refreshable bool
 }
 
 // Expired reports whether the cached token is past its expiry.
@@ -99,6 +139,11 @@ func InspectProfile(ctx context.Context, name string) (ProfileAuth, error) {
 		return ProfileAuth{Name: name}, errors.WithStack(err)
 	}
 
+	configFile := env.SharedConfigFile
+	if configFile == "" && len(awsconfig.DefaultSharedConfigFiles) > 0 {
+		configFile = awsconfig.DefaultSharedConfigFiles[0]
+	}
+
 	cfg, err := awsconfig.LoadSharedConfigProfile(ctx, lookup, func(o *awsconfig.LoadSharedConfigOptions) {
 		if env.SharedConfigFile != "" {
 			o.ConfigFiles = []string{env.SharedConfigFile}
@@ -120,13 +165,35 @@ func InspectProfile(ctx context.Context, name string) (ProfileAuth, error) {
 		CredentialProcess: cfg.CredentialProcess,
 	}
 
-	// A legacy SSO profile carries the start URL on the profile itself; the
-	// modern form carries it on the referenced [sso-session] block.
-	if cfg.SSOSessionName == "" {
+	// A legacy SSO profile carries the start URL and region on the profile
+	// itself; the modern form carries them on the referenced [sso-session]
+	// block, which is also where the registration scopes live. The SDK parses
+	// that block but exposes no scopes, so they are read from the file directly.
+	switch {
+	case cfg.SSOSession != nil:
+		auth.SSOStartURL = cfg.SSOSession.SSOStartURL
+		auth.SSORegion = cfg.SSOSession.SSORegion
+		auth.SSORegistrationScopes = readSSORegistrationScopes(configFile, cfg.SSOSessionName)
+
+	default:
 		auth.SSOStartURL = cfg.SSOStartURL
+		auth.SSORegion = cfg.SSORegion
 	}
 
 	return auth, nil
+}
+
+// ssoTokenPath is where the SDK caches this profile's SSO token: a sha1 of the
+// sso_session name, or of the start URL for a legacy profile. Both the preflight
+// and the device-authorization flow resolve it through here, so a login always
+// writes the file the credential chain then reads.
+func ssoTokenPath(auth ProfileAuth) (string, error) {
+	path, err := ssocreds.StandardCachedTokenFilepath(auth.SSOCacheKey())
+	if err != nil {
+		return "", errors.WithStack(err)
+	}
+
+	return path, nil
 }
 
 // CheckSSOToken locates and reads the cached SSO token for the profile. It
@@ -136,19 +203,17 @@ func CheckSSOToken(auth ProfileAuth) (SSOTokenStatus, error) {
 		return SSOTokenStatus{}, nil
 	}
 
-	// The SDK keys the cache by sso_session name, falling back to the start URL
-	// for legacy profiles.
-	key := auth.SSOSession
-	if key == "" {
-		key = auth.SSOStartURL
-	}
-
-	path, err := ssocreds.StandardCachedTokenFilepath(key)
+	path, err := ssoTokenPath(auth)
 	if err != nil {
-		return SSOTokenStatus{}, errors.WithStack(err)
+		return SSOTokenStatus{}, err
 	}
 
 	status := SSOTokenStatus{Path: path}
+
+	// Writability is reported even when no token exists yet: that is exactly the
+	// case where a login is about to create the file, and a read-only mount is
+	// the reason it will fail.
+	status.CacheWritable = dirWritable(filepath.Dir(path))
 
 	raw, err := os.ReadFile(path)
 	if err != nil {
@@ -159,36 +224,65 @@ func CheckSSOToken(auth ProfileAuth) (SSOTokenStatus, error) {
 	}
 
 	status.Found = true
-	status.ExpiresAt = parseTokenExpiry(raw)
-	status.CacheWritable = dirWritable(filepath.Dir(path))
+	status.ExpiresAt, status.Refreshable = parseTokenExpiry(raw)
 
 	return status, nil
 }
 
-// parseTokenExpiry pulls expiresAt out of a cached token file. The token itself
-// is deliberately not decoded — only the expiry is needed, and the file holds
-// live credentials.
-func parseTokenExpiry(raw []byte) time.Time {
+// parseTokenExpiry pulls the expiry out of a cached token file, and whether the
+// cache carries everything the SDK needs to refresh itself. The secrets are
+// deliberately not returned — only their presence is interesting, and the file
+// holds live credentials.
+func parseTokenExpiry(raw []byte) (time.Time, bool) {
 	var doc struct {
-		ExpiresAt string `json:"expiresAt"`
+		ExpiresAt    string `json:"expiresAt"`
+		RefreshToken string `json:"refreshToken"`
+		ClientID     string `json:"clientId"`
+		ClientSecret string `json:"clientSecret"`
 	}
 
-	if err := json.Unmarshal(raw, &doc); err != nil || doc.ExpiresAt == "" {
-		return time.Time{}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return time.Time{}, false
+	}
+
+	refreshable := doc.RefreshToken != "" && doc.ClientID != "" && doc.ClientSecret != ""
+
+	if doc.ExpiresAt == "" {
+		return time.Time{}, refreshable
 	}
 
 	expiresAt, err := time.Parse(time.RFC3339, doc.ExpiresAt)
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, refreshable
 	}
 
-	return expiresAt
+	return expiresAt, refreshable
 }
 
 // dirWritable reports whether a file can be created in dir, which is what the
 // SDK does when it caches a refreshed token (temp file + rename).
+//
+// A missing directory is judged by its nearest existing ancestor: before the
+// first login ~/.aws/sso/cache does not exist, and whether it can be created is
+// the question that matters — reporting "not writable" for it would point at the
+// wrong problem.
 func dirWritable(dir string) bool {
-	f, err := os.CreateTemp(dir, ".aws-mcp-writecheck-*")
+	probe := dir
+
+	for {
+		if _, err := os.Stat(probe); err == nil {
+			break
+		}
+
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			return false
+		}
+
+		probe = parent
+	}
+
+	f, err := os.CreateTemp(probe, ".aws-mcp-writecheck-*")
 	if err != nil {
 		return false
 	}
@@ -252,8 +346,21 @@ func PreflightProfile(ctx context.Context, name string) (ProfileAuth, error) {
 		}
 
 		if status.Expired() {
-			return auth, errors.Errorf("aws profile %q has an expired SSO token (expired %s); run: %s",
-				label, status.ExpiresAt.Format(time.RFC3339), auth.LoginHint())
+			// An expired access token is only a problem when the cache cannot
+			// renew itself. With a refresh token and client registration present
+			// the SDK trades them for a new access token on first use, so
+			// aborting here would demand a browser approval nobody needs.
+			if !status.Refreshable {
+				return auth, errors.Errorf("aws profile %q has an expired SSO token that cannot be refreshed (expired %s); run: %s",
+					label, status.ExpiresAt.Format(time.RFC3339), auth.LoginHint())
+			}
+
+			log.Warn().
+				Str("profile", label).
+				Time("token_expired_at", status.ExpiresAt).
+				Msg("[mcpserver.PreflightProfile] sso access token expired; the sdk will refresh it from the cached refresh token on first use")
+
+			break
 		}
 
 		if status.ExpiresAt.IsZero() {
@@ -287,6 +394,39 @@ func PreflightProfile(ctx context.Context, name string) (ProfileAuth, error) {
 	}
 
 	return auth, nil
+}
+
+// credentialFailureMarkers are the substrings that identify a failure a login
+// would fix. They cover both the SDK's wording and this package's own preflight
+// messages.
+var credentialFailureMarkers = []string{
+	"cached SSO token is expired",
+	"refresh cached SSO token failed",
+	"unable to refresh SSO token",
+	"InvalidGrantException",
+	"no cached SSO token",
+	"expired SSO token",
+	"malformed SSO token cache",
+	"ExpiredToken",
+	"token has expired",
+	"failed to refresh cached credentials",
+	"failed to retrieve credentials",
+	"UnrecognizedClientException",
+	"InvalidClientTokenId",
+}
+
+// IsCredentialFailure reports whether an error is the kind a re-login fixes.
+//
+// It gates starting a device-authorization flow: an AWS call can fail for plenty
+// of reasons that have nothing to do with credentials — a region the account has
+// not enabled, a missing IAM grant, a throttle — and sending the user to a
+// browser for those would be noise at best.
+func IsCredentialFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	return containsAny(err.Error(), credentialFailureMarkers...)
 }
 
 // ExplainCredentialError turns an opaque AWS SDK credential failure into a

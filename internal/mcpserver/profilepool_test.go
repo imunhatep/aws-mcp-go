@@ -29,7 +29,7 @@ func (f *fakeRegionPool) GetClients(_ ...ptypes.AwsRegion) ([]*v3.Client, error)
 }
 
 func TestProfilePoolListAccountIDsDedupesAndSorts(t *testing.T) {
-	pool := &ProfilePool{entries: []profileEntry{
+	pool := &ProfilePool{entries: []*profileEntry{
 		{name: "prod", accountID: "222222222222"},
 		{name: "dev", accountID: "111111111111"},
 		// A second profile onto the same account, e.g. a read-only variant.
@@ -44,10 +44,10 @@ func TestProfilePoolListAccountIDsDedupesAndSorts(t *testing.T) {
 }
 
 func TestProfilePoolGetClientsSkipsFailingProfile(t *testing.T) {
-	ok := &fakeRegionPool{clients: []*v3.Client{}}
+	ok := &fakeRegionPool{clients: []*v3.Client{{}}}
 	broken := &fakeRegionPool{err: errors.New("sso session expired")}
 
-	pool := &ProfilePool{entries: []profileEntry{
+	pool := &ProfilePool{entries: []*profileEntry{
 		{name: "broken", accountID: "111111111111", pool: broken},
 		{name: "dev", accountID: "222222222222", pool: ok},
 	}}
@@ -55,10 +55,29 @@ func TestProfilePoolGetClientsSkipsFailingProfile(t *testing.T) {
 	clients, err := pool.GetClients(ptypes.DefaultAwsRegion)
 
 	// One bad profile must not fail the whole query — the healthy profile is
-	// still consulted.
+	// still consulted, and its client is returned.
 	require.NoError(t, err)
-	assert.Empty(t, clients)
+	assert.Len(t, clients, 1)
 	assert.Equal(t, 1, ok.calls)
+}
+
+// TestProfilePoolGetClientsErrorsWhenEveryProfileFails pins the other half of
+// that contract. An empty client list with failures behind it must not be
+// reported as success: the caller would render it as "no resources", which is
+// the same answer it would give for an empty account. Nobody being logged in and
+// nothing existing have to look different.
+func TestProfilePoolGetClientsErrorsWhenEveryProfileFails(t *testing.T) {
+	pool := &ProfilePool{entries: []*profileEntry{
+		{name: "dev", accountID: "111111111111", pool: &fakeRegionPool{err: errors.New("sso session expired")}},
+		{name: "prod", accountID: "222222222222", pool: &fakeRegionPool{err: errors.New("sso session expired")}},
+	}}
+
+	clients, err := pool.GetClients(ptypes.DefaultAwsRegion)
+
+	require.Error(t, err)
+	assert.Empty(t, clients)
+	assert.Contains(t, err.Error(), "dev")
+	assert.Contains(t, err.Error(), "prod")
 }
 
 // TestProfilePoolGetAccountClientsOnlyTouchesThatAccount is the point of the
@@ -70,7 +89,7 @@ func TestProfilePoolGetAccountClientsOnlyTouchesThatAccount(t *testing.T) {
 	dev := &fakeRegionPool{clients: []*v3.Client{{}}}
 	prod := &fakeRegionPool{clients: []*v3.Client{{}}}
 
-	pool := &ProfilePool{entries: []profileEntry{
+	pool := &ProfilePool{entries: []*profileEntry{
 		{name: "mydev", accountID: "111111111111", pool: dev},
 		{name: "myprod", accountID: "222222222222", pool: prod},
 	}}
@@ -88,7 +107,7 @@ func TestProfilePoolGetAccountClientsOnlyTouchesThatAccount(t *testing.T) {
 func TestProfilePoolGetAccountClientsRejectsUnreachableAccount(t *testing.T) {
 	dev := &fakeRegionPool{clients: []*v3.Client{{}}}
 
-	pool := &ProfilePool{entries: []profileEntry{
+	pool := &ProfilePool{entries: []*profileEntry{
 		{name: "mydev", accountID: "111111111111", pool: dev},
 	}}
 
@@ -109,7 +128,7 @@ func TestProfilePoolGetAccountClientsSpansProfilesForOneAccount(t *testing.T) {
 	second := &fakeRegionPool{clients: []*v3.Client{{}}}
 	other := &fakeRegionPool{clients: []*v3.Client{{}}}
 
-	pool := &ProfilePool{entries: []profileEntry{
+	pool := &ProfilePool{entries: []*profileEntry{
 		{name: "dev", accountID: "111111111111", pool: first},
 		{name: "dev-ro", accountID: "111111111111", pool: second},
 		{name: "prod", accountID: "222222222222", pool: other},
@@ -131,7 +150,7 @@ func TestProfilePoolGetClientsDedupesAccountRegion(t *testing.T) {
 	// return every row twice.
 	shared := &v3.Client{}
 
-	pool := &ProfilePool{entries: []profileEntry{
+	pool := &ProfilePool{entries: []*profileEntry{
 		{name: "dev", accountID: "111111111111", pool: &fakeRegionPool{clients: []*v3.Client{shared}}},
 		{name: "dev-ro", accountID: "111111111111", pool: &fakeRegionPool{clients: []*v3.Client{{}}}},
 	}}

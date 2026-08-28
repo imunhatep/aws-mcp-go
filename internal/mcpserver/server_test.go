@@ -59,6 +59,8 @@ func TestListTools(t *testing.T) {
 		"list_resource_types", "list_regions", "list_accounts", "list_resources", "count_resources",
 		"list_resources_fallback",
 		"get_cost_and_usage", "get_cost_forecast", "list_cost_dimension_values", "list_cost_dimensions",
+		"aws_auth_status", "aws_sso_login",
+		"list_savings_plans", "list_savings_plan_rates",
 	} {
 		assert.Truef(t, names[want], "expected tool %q to be registered", want)
 	}

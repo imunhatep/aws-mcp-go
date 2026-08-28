@@ -140,6 +140,8 @@ func (s *Server) registerTools() {
 	)
 
 	s.registerCostTools()
+	s.registerAuthTools()
+	s.registerSavingsPlansTools()
 }
 
 func (s *Server) handleListResourceTypes(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

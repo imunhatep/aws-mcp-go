@@ -22,7 +22,7 @@ Version/commit are injected at build time via `-ldflags` into `internal/version`
 
 ### awslib dependency
 
-`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.5.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
+`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.9.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
 
 The repo vendors its dependencies (`vendor/`), so run `go mod tidy && go mod vendor` after any dependency change or the build fails with "inconsistent vendoring". `vendor/` is gitignored — it is a local build input, not committed state.
 
@@ -40,24 +40,25 @@ Two things to know about both workflows:
 Request flow, outermost to innermost:
 
 - `cmd/aws-mcp/main.go` → `internal.NewApp()` (root `urfave/cli/v3` command, global `--verbose`/`zerolog` setup) → attaches `command.ServeCommand` and `command.VersionCommand`.
-- `internal/command/serve.go` is the composition root for `serve`: parses flags into `internal/config.Config`, builds the client pool, builds the cache, then `mcpserver.NewServer(...)` + `ServeHTTP` (streamable-HTTP transport, endpoint `/mcp`).
-- `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go`.
+- `internal/command/serve.go` is the composition root for `serve`: parses flags into `internal/config.Config`, builds the SSO login manager, builds the client pool (lazily — see below), builds the cache, then `mcpserver.NewServer(...).WithAuth(...)` + `ServeHTTP` (streamable-HTTP transport, endpoint `/mcp`).
+- `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools, `registerAuthTools()` (in `auth_tools.go`) for `aws_auth_status` / `aws_sso_login`, and `registerSavingsPlansTools()` (in `savingsplans_tools.go`) for the Savings Plans tools; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go` and the Savings Plans ones in `savingsplans.go`.
 
 ### The ClientPool abstraction (why the auth modes are transparent)
 
 `mcpserver.ClientPool` (server.go) is a **local interface** with just `GetClients` + `ListAccountIDs`. Three implementations satisfy it, and `buildClientPool` in `serve.go` picks one:
 
-- **Local mode** (default) → `provider.NewClientPool` — single account from the default AWS credential chain (SSO, `AWS_PROFILE`, env, IMDS).
+- **Local mode** (default) → `provider.NewClientPool` — single account from the default AWS credential chain (SSO, `AWS_PROFILE`, env, IMDS), wrapped in `mcpserver.LazyPool`.
 - **Multi-profile mode** (`--profiles`) → `mcpserver.NewProfilePool` (`profilepool.go`, this repo's own implementation) — one account per named AWS shared-config profile.
-- **Assume-role mode** (`--assume-role` or `--assume-role-arns`) → `v3.NewClientPool` — cross-account, either from explicit ARNs (`parseRoleArns`, accepts `accountID=roleArn` or a bare ARN) or auto-discovered from the current IAM role's policies.
+- **Assume-role mode** (`--assume-role` or `--assume-role-arns`) → `v3.NewClientPool` — cross-account, either from explicit ARNs (`parseRoleArns`, accepts `accountID=roleArn` or a bare ARN) or auto-discovered from the current IAM role's policies. Also wrapped in `LazyPool`, since discovery itself needs working credentials.
 
 The modes are mutually exclusive — `config.Validate` rejects `--profiles` combined with either assume-role flag. Only the local and assume-role branches build the default `v3.ClientBuilder` and run `logCallerIdentity`; profile mode never touches the default credential chain.
 
-**`ProfilePool` specifics.** One `v3.ClientBuilder` + `provider.ClientPool` per profile. It deliberately does *not* use `v3.DefaultAwsClientProviders`: that helper folds ambient `AWS_ACCESS_KEY_ID` / `AWS_PROFILE` env credentials into the config, and a static credentials provider beats `WithSharedConfigProfile`, which would collapse every profile onto the same identity. So it builds the retry options plus `WithSharedConfigProfile` itself. Two invariants worth keeping:
+**`ProfilePool` specifics.** One `v3.ClientBuilder` + `provider.ClientPool` per profile. It deliberately does *not* use `v3.DefaultAwsClientProviders`: that helper folds ambient `AWS_ACCESS_KEY_ID` / `AWS_PROFILE` env credentials into the config, and a static credentials provider beats `WithSharedConfigProfile`, which would collapse every profile onto the same identity. So it builds the retry options plus `WithSharedConfigProfile` itself. Invariants worth keeping:
 
-- **Preflight before AWS** — `PreflightProfile` (`credcheck.go`) parses the profile's shared config first, so an undefined profile, a missing/expired/malformed SSO token or an unrunnable `credential_process` aborts with an actionable message before a client is built.
-- **Eager identity, lazy regions** — the constructor does one STS `GetCallerIdentity` per profile (fails fast on expired SSO, and caches the account ID so `ListAccountIDs` answers before any region client exists); region clients are still created on demand by the inner pools.
-- **Dedupe by `(accountID, region)`** in `GetClients` — two profiles can point at the same account, and `fetchResources` fans out over every client without deduplicating, so duplicates would double rows and inflate counts. A profile that fails for a region is logged and skipped, not fatal.
+- **Preflight before AWS** — `PreflightProfile` (`credcheck.go`) parses the profile's shared config first, so an undefined profile, a missing/unrefreshable/malformed SSO token or an unrunnable `credential_process` is reported with an actionable message before a client is built.
+- **Lazy identity, lazy regions** — `NewProfilePool` makes no AWS call at all. The account ID comes from `sso_account_id` in the shared config, so `ListAccountIDs` and account scoping answer for free; `resolve` does one STS `GetCallerIdentity` per profile on first use, and region clients are created on demand by the inner pools. A failed profile keeps its error for `profileRetryInterval` (5s) and is then retried, which is what makes a re-login take effect without a restart.
+- **Partial failure is not failure** — one unusable profile does not fail a query across the others, but if *no* profile authenticates, or every client build fails, `GetClients` errors instead of returning an empty slice. `TestProfilePoolGetClientsErrorsWhenEveryProfileFails` pins this: "nobody is logged in" must not render as "no resources".
+- **Dedupe by `(accountID, region)`** in `GetClients` — two profiles can point at the same account, and `fetchResources` fans out over every client without deduplicating, so duplicates would double rows and inflate counts.
 
 The rest of the server never branches on auth mode — it only sees the interface.
 
@@ -120,6 +121,26 @@ Cost Explorer is a billing API, not an inventory one, so it bypasses the resourc
 
 **Result shaping.** `buildCostResult` returns groups aggregated over the whole window (ranked by the first metric, truncated to `limit`) *and* the same data split by period. Two details worth keeping: with a `group_by` set the API leaves `ResultByTime.Total` empty, so totals are summed from the groups instead; and tag/cost-category group keys come back as `<key>$<value>`, which `costAccumulator.groupKeys` unwraps (empty value → `(not set)`).
 
+### Savings Plans data path (`savingsplans.go`, `savingsplans_tools.go`)
+
+`list_savings_plans` (inventory) and `list_savings_plan_rates` (offering rates) come from awslib's `service/savingsplans`. Neither is a resource — a purchased plan is a contract, a rate is a price, and nothing in that package implements `service.ResourceInterface` or is reachable through `FindAll` — so, like Cost Explorer, they bypass the proxy/provider pipeline entirely. Upstream's own notes are in awslib's `docs/savingsplans.md`.
+
+The API is **partition-global** (`savingsplans.amazonaws.com`): the client's region decides only which credentials sign. Everything else follows from that:
+
+- **`savingsPlansRepositories(accountID, cached)`** asks `poolClients` — not `s.pool` — for `DefaultAwsRegion` clients only, one per account. Going through `poolClients` is the rule from the account-scoping section above, and `TestSavingsPlansScopeByAccount` pins it. (The older `costRepositories` still filters after `GetClients`; new fetch paths do not.)
+- **Inventory fans out, rates do not.** Plans differ per account so every account is queried and each row carries its `account_id`; rates are public prices identical whichever account asks, so exactly one repository is used — fanning out would return the same price list N times.
+- **Inventory is deliberately uncached** (`cached=false`). It answers "what are we committed to right now", and the 6h resource-cache window answers a different question. Rates are cached.
+- **`region` is a filter, never an endpoint.** For inventory it matches the plan's own `Region`, which only EC2 Instance plans carry — so a region filter excludes Compute plans, and that is correct, not a bug. For rates it goes into `OfferingRatesQuery.Region`.
+
+Four things worth keeping:
+
+- **`state` defaults to `active`.** `DescribeSavingsPlans` keeps returning retired, queued and payment-failed plans, so an unfiltered inventory overstates coverage — the one filter AWS does apply is the one that matters most.
+- **`region` + (`instance_type` | `instance_family`) are required for rates**, checked before any AWS call. awslib deliberately offers no unfiltered `ListOfferingRatesAll` because the price list is thousands of pages; this is that guard at the tool boundary.
+- **`product` resolves the product type and the rate service code together** (`spProducts`). The API takes them separately and a mismatched pair returns *nothing* rather than erroring. Note Fargate rates are published under `AmazonECS`, with `AmazonEKS` as a separate `fargate-eks` lookup.
+- **Lookup-table keys must be pre-normalized.** `normalizeSPToken` strips spaces, hyphens and underscores, so a key spelled `"ec2-instance"` in `planTypeAliases` is unreachable — a bug a map hides rather than reports. `spProducts` keeps readable keys (they double as the error message's vocabulary) and is therefore matched by normalizing both sides, not by direct indexing.
+
+The summary in the inventory envelope sums per currency and never across, counts unparseable amounts in `amounts_unparsed` instead of treating them as zero, and covers every matching plan rather than the truncated page — a response that caps rows must still state the real commitment.
+
 ### Resource-type registry — keep in sync with awslib
 
 `SupportedResourceTypes()` in `resource.go` is a hand-maintained allowlist that **must mirror awslib's `proxy.RepoProxy.FindAll` dispatch switch**. Types in awslib's registry but not wired into `FindAll` (e.g. Athena, CloudTrail) are deliberately omitted so callers never hit a "resource type not supported" error. When awslib adds/removes a `FindAll` case, update this list. `ResolveResourceType` accepts both canonical (`AWS::EC2::Instance`, case-insensitive) and URL (`aws_ec2_instance`) forms.
@@ -142,15 +163,25 @@ Four rules hold this together:
 - **Narrowing is never silent, and never overrides an explicit `region`.** What was skipped, and why, goes into the same `warnings` array as the unreachable pairs. A caller that cannot see the narrowing cannot tell it from a smaller estate.
 
 The result is cached per account by `regionCache` on the TTL passed to `Server.WithRegionTTL` (`serve.go` gives it the same value as the client-failure cache, since both record something a deliberate act changes). This is not a substitute for `v3.FailureCache`: that makes a repeat of a known-bad pair cheap, this avoids asking at all — which is what the first sweep after a restart needs.
+### Credentials are never fatal (`lazypool.go`, `ssologin.go`, `auth_tools.go`)
+
+An MCP server that exits when credentials are unusable hands the calling agent a refused connection — no explanation, no recovery. This used to happen: `buildClientPool` resolved credentials during `serve`, so an expired SSO token reached `main` and `os.Exit(1)`. Three pieces prevent it, and the property they defend is *always answer, never exit*:
+
+- **`LazyPool`** wraps the local and assume-role pools: nothing touches AWS until the first tool call, failures are returned to that caller, and construction is retried after `lazyRetryInterval` (5s) — so a re-login lands without a restart. `buildClientPool` now errors only for operator mistakes that cannot fix themselves (malformed role ARN, duplicate profile). `serve.run` warms the pool in a background goroutine purely for the startup log.
+- **`SSOLoginManager`** runs the RFC 8628 device-authorization flow in-process with `ssooidc` (`RegisterClient` → `StartDeviceAuthorization` → poll `CreateToken`), then writes the token to `ssocreds.StandardCachedTokenFilepath` in the CLI's JSON shape, mode 0600, temp file + rename. Four things to keep: one flow per `sso_session` (25 profiles on one session ⇒ one code, not 25); the cached OIDC registration is reused because re-registering invalidates the refresh token beside it; `Explain` only starts a flow when `IsCredentialFailure(err)` — a disabled region or a missing IAM grant must not send anyone to a browser; and the device code stays unexported so it cannot reach a tool result.
+- **`aws_auth_status` / `aws_sso_login`** are the agent's way out. Both work with a nil pool and read only local files, which is the point: they have to answer *while* AWS is unusable.
+
+`--sso-auto-login` (default true) governs only the automatic start from a failing tool call; `aws_sso_login` works regardless. `--sso-open-browser` is a host convenience, skipped when `inContainer()`.
 
 ### Credential preflight (`credcheck.go`)
 
-AWS credential failures surface from the SDK as long, causeless strings, and in this server they surface on the *first tool call* rather than at startup. `credcheck.go` closes both gaps, using only local file reads:
+AWS credential failures surface from the SDK as long, causeless strings, and they surface on a *tool call* rather than at startup. `credcheck.go` closes both gaps, using only local file reads:
 
 - `InspectProfile` reads a profile via `awsconfig.LoadSharedConfigProfile`. That function does **not** honour `AWS_CONFIG_FILE`/`AWS_SHARED_CREDENTIALS_FILE` on its own (unlike `LoadDefaultConfig`), so the overrides are read from `awsconfig.NewEnvConfig()` and passed in — otherwise the preflight would inspect different files than the credential chain does.
 - `CheckSSOToken` locates the cached token with the SDK's own `ssocreds.StandardCachedTokenFilepath` (sha1 of the `sso_session` name, or of the start URL for legacy profiles) and reads only `expiresAt` out of it — the file holds live credentials.
 - The **writability check is on the directory, not the file**: `ssocreds.storeCachedToken` writes `<token>.tmp-<nanos>` alongside the token and renames it, so a read-only `~/.aws/sso/cache` mount fails at the first refresh, hours after a healthy-looking startup.
-- `PreflightProfile` decides warn vs abort (the table is in `docs/authentication.md`); `ExplainCredentialError` wraps SDK errors that still get through. Both are called from `NewProfilePool` and from `logCallerIdentity` in `serve.go`, so all three auth modes get the same treatment.
+- `PreflightProfile` decides warn vs fail (the table is in `docs/authentication.md`) — "fail" means *this profile is unusable now*, never *the process exits*. One deliberate downgrade: an expired access token whose cache still holds a refresh token and client registration (`SSOTokenStatus.Refreshable`) is a warning, because the SDK renews it on first use — treating it as fatal was demanding a browser approval nobody needed.
+- `ExplainCredentialError` wraps SDK errors that still get through, and `SSOLoginManager.Explain` layers the login instructions on top. Both are reached from `ProfilePool.resolve`/`explain` and from `logCallerIdentity` in `serve.go`, so all three auth modes get the same treatment.
 
 Native `sso_session` profiles need no code beyond this — the SDK resolves and refreshes them. `credential_process` profiles cannot work in the distroless image (no shell), which is why they are warned about explicitly.
 

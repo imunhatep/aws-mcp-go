@@ -67,6 +67,22 @@ type Server struct {
 	cache   *cache.DataCache
 	regions *regionCache
 	mcp     *server.MCPServer
+
+	// login and profiles back the aws_auth_status / aws_sso_login tools. Both
+	// are optional: with no login manager the tools still report credential
+	// state, they just cannot start a login.
+	login    *SSOLoginManager
+	profiles []string
+}
+
+// WithAuth attaches the SSO login manager and the configured profile names, which
+// is what the aws_auth_status and aws_sso_login tools report on. profiles may be
+// a single empty string, meaning the default credential chain.
+func (s *Server) WithAuth(login *SSOLoginManager, profiles []string) *Server {
+	s.login = login
+	s.profiles = profiles
+
+	return s
 }
 
 // NewServer builds an MCP server around the given client pool. dc may be nil to
