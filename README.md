@@ -49,7 +49,8 @@ claude mcp add --transport http aws http://127.0.0.1:3040/mcp
 Prefer to keep AWS config and the SSO cache off the server entirely? Run it with
 `--credentials-passthrough` and let Claude Code forward your locally resolved
 credentials with each request — see
-[credential passthrough](docs/authentication.md#credential-passthrough--the-client-forwards-its-own-credentials).
+[credential passthrough](docs/authentication.md#credential-passthrough--the-client-forwards-its-own-credentials)
+([in a container](docs/container.md#credential-passthrough--nothing-aws-related-in-the-container)).
 
 Startup validates every profile before serving, so a missing or expired SSO
 login fails immediately with the command that fixes it — not on the first

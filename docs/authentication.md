@@ -143,6 +143,8 @@ Notes:
   `127.0.0.1`, or put a TLS-terminating proxy in front. The server warns when it
   listens on every interface over plain HTTP. Inside a container that warning
   is expected when the port is published on loopback only (`-p 127.0.0.1:3040:3040`).
+  The full container setup, including running the helper from the image, is in
+  [container.md](container.md#credential-passthrough--nothing-aws-related-in-the-container).
 - **One pool per credential set.** Requests carrying the same header share a
   client pool, so clients, region lookups and the failure cache are reused. A
   refreshed set gets a new pool. Idle or fully expired pools are dropped after

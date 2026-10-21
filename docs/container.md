@@ -120,6 +120,95 @@ cache directory.
 Single-account SSO is the same command without `--profiles` and with
 `-e AWS_PROFILE=dev`.
 
+## Credential passthrough — nothing AWS-related in the container
+
+With `--credentials-passthrough` the container holds no credentials and mounts
+no `~/.aws` at all. The MCP client resolves credentials on its own machine and
+forwards them with every request in the `X-Aws-Credentials` header; the server
+uses those and nothing else. The mechanism, expiry handling and wire format are in
+[authentication.md](authentication.md#credential-passthrough--the-client-forwards-its-own-credentials).
+
+**1. Run the container** with no volumes and no AWS environment:
+
+```sh
+podman run --rm -d \
+  --name aws-mcp \
+  -p 127.0.0.1:3040:3040 \
+  ghcr.io/imunhatep/aws-mcp-go:latest \
+  serve --credentials-passthrough
+```
+
+`-e MCP_CREDENTIALS_PASSTHROUGH=true` with the image's default `serve` command
+does the same.
+
+**2. Log in on the client machine**, with the profiles defined there as in the
+SSO section above:
+
+```sh
+aws sso login --sso-session my-session
+```
+
+**3. Register the server with a `headersHelper`.** The helper runs on the client
+machine, not in the server's container, so the client needs the `aws-mcp`
+binary — take it from a release tarball (`aws-mcp_<version>_<os>_<arch>.tar.gz`)
+or `make build`:
+
+```sh
+claude mcp add-json --scope user aws '{
+  "type": "http",
+  "url": "http://127.0.0.1:3040/mcp",
+  "headersHelper": "/usr/local/bin/aws-mcp credentials-headers --profiles dev,prod"
+}'
+```
+
+**No binary on the client?** The image can run the helper too. It reads the
+client's config and SSO cache through the same mounts as the SSO setup above,
+prints the header and exits:
+
+```sh
+claude mcp add-json --scope user aws '{
+  "type": "http",
+  "url": "http://127.0.0.1:3040/mcp",
+  "headersHelper": "podman run --rm -v $HOME/.aws/config:/home/nonroot/.aws/config:ro -v $HOME/.aws/sso/cache:/home/nonroot/.aws/sso/cache:rw ghcr.io/imunhatep/aws-mcp-go:latest credentials-headers --profiles dev,prod"
+}'
+```
+
+`$HOME` is expanded by the shell Claude Code runs the helper through. Pull the
+image beforehand: Claude Code kills a helper after 10 seconds, and a first-run
+pull inside that budget fails the connection. Once pulled, a helper run takes
+well under a second. Only the default `--source sdk` works this way — the image
+has no `aws` binary for `--source aws-cli`. The cache is mounted read-write
+because the SDK refreshes the SSO token in place, and the file-ownership note
+above applies to it.
+
+**4. Check the startup log:**
+
+```
+INF [serve] credential passthrough: using only the AWS credentials each request forwards header=X-Aws-Credentials
+WRN [serve] credential passthrough over plain HTTP on every interface: forwarded AWS credentials cross the network in cleartext; bind to 127.0.0.1 or put a TLS-terminating proxy in front addr=0.0.0.0:3040
+INF [mcpserver.ServeHTTP] starting MCP streamable-HTTP server addr=0.0.0.0:3040 credentials_passthrough=true endpoint=/mcp
+```
+
+Four things worth knowing:
+
+- **The plain-HTTP warning is expected here.** The image listens on `0.0.0.0`
+  inside the container; publishing the port on `127.0.0.1` is what keeps it off
+  the network. When the container serves other machines, put a TLS-terminating
+  proxy in front, because the header carries live credentials.
+- **Logins happen on the client, never in the container.** `--sso-auto-login`,
+  `--sso-open-browser` and the other `--sso-*` flags have no effect, and
+  `aws_sso_login` only explains what to run: the server cannot write the client's
+  SSO cache. After `aws sso login` on the client, reconnect the server
+  (`/mcp` → aws → *Reconnect*). Expired *role* credentials need nothing — the
+  server answers with a 401 and Claude Code re-runs the helper on its own.
+- **One container can serve several people**, each with their own credentials.
+  The resource cache is keyed by account, not by caller, so add `--no-cache` if
+  two callers with different roles in the same account must not share listings.
+  Otherwise the cache can be persisted as described below.
+- **`AWS_*` variables passed to the container are ignored.** `AWS_PROFILE` is
+  unset at startup (with a warning) and the server's shared config files are not
+  read, so a stray `-e` or mount cannot become a fallback identity.
+
 ## Static or assumed-role credentials
 
 Credentials from the current shell, in cross-account mode:
@@ -184,3 +273,5 @@ the ones specific to running in a container:
 | `is not defined in ~/.aws/config` | The config mount is missing, or the profile only exists in a file that was not mounted |
 | `credential_process could not be executed … no shell` | A `credential_process` profile in a distroless image — convert it to `sso_session` |
 | `legacy SSO profile … cannot refresh this token` | Profile uses `sso_start_url` directly; move it under an `[sso-session]` block so refresh works |
+| Tool result: `this request carries no AWS credentials: the server runs with --credentials-passthrough …` | Passthrough server, but the client was registered without a `headersHelper` — re-register with `add-json` as above, then reconnect |
+| The client fails to connect at all, passthrough with a containerized helper | The helper did not finish within 10 seconds, usually an image pull on its first run. `podman pull` the image, then reconnect |
