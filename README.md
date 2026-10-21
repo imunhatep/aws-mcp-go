@@ -67,6 +67,8 @@ question you ask.
 | `get_cost_and_usage` | "What did we spend on …" — grouped, filtered, multi-account |
 | `get_cost_forecast` | "What will we spend …" |
 | `list_cost_dimensions`, `list_cost_dimension_values` | The cost vocabulary, and the exact strings filters need |
+| `list_cost_anomalies` | "What caused this cost anomaly" — Cost Anomaly Detection findings with every root cause and its dollar contribution |
+| `list_cost_anomaly_monitors` | "Is this spend monitored, who gets alerted" — anomaly monitors and their subscriptions |
 | `aws_auth_status`, `aws_sso_login` | "why can't you see my account" — credential state, and an SSO login the agent can walk the user through |
 | `aws_usage_guide` | How to use all of the above — the agent-facing guide, whole or by topic |
 | `list_savings_plans` | "what are we committed to" — purchased Savings Plans, hourly commitment, terms, what expires next |
@@ -100,7 +102,7 @@ works as a standalone Claude Code skill.
 | [Authentication](docs/authentication.md) | Local, multi-profile, assume-role and credential-passthrough modes; the startup credential checks |
 | [Running in a container](docs/container.md) | Multi-account AWS SSO with podman, image builds, cache volumes, troubleshooting |
 | [Resource tools](docs/tools.md) | `list_resources` views/filters/pagination, `count_resources` aggregation, `list_resources_fallback` for unsupported types |
-| [Cost Explorer](docs/cost-explorer.md) | Periods, groupings, filter shape, response layout, per-request billing |
+| [Cost Explorer](docs/cost-explorer.md) | Periods, groupings, filter shape, response layout, per-request billing, cost anomalies and monitors, IAM permissions |
 | [Savings Plans](docs/savings-plans.md) | Purchased plans and offering rates: why region is a filter, the defaults, the summary |
 | [Configuration](docs/configuration.md) | Commands, flags and environment variables, caching, client config |
 | [Development](docs/development.md) | Building, the awslib dependency, make targets, CI and releases |
@@ -109,7 +111,9 @@ works as a standalone Claude Code skill.
 
 Go 1.25+ to build, and AWS credentials the standard chain can resolve — an SSO
 session, a profile, environment variables or an instance role. Read-only IAM
-permissions are enough (`ce:GetCostAndUsage` and friends for the cost tools;
+permissions are enough (`ce:GetCostAndUsage` and friends for the cost tools,
+`ce:GetAnomalies` / `GetAnomalyMonitors` / `GetAnomalySubscriptions` for the
+anomaly tools;
 `savingsplans:DescribeSavingsPlans` / `DescribeSavingsPlansOfferingRates` for the
 Savings Plans tools; `cloudcontrol:ListResources` / `GetResource` plus the target
 service's own read permission for `list_resources_fallback`, which a broad

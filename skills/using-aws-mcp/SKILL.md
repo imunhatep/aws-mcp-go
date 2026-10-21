@@ -1,13 +1,14 @@
 ---
 name: using-aws-mcp
-description: Use whenever a question is about AWS resources, inventory or spend and the aws MCP server (aws-mcp) is connected — "how many / list / which X do we have", "what does Y cost", "forecast", "savings plans", "why can't you see account Z". Covers choosing between list_resources, count_resources and list_resources_fallback (the Cloud Control fallback that serves almost every type NOT in list_resource_types — NAT gateways, ENIs, KMS keys, IAM roles, ECR, ElastiCache, MSK, OpenSearch, Kinesis, Step Functions, API Gateway, Transit Gateway…), reading the queried/warnings envelope, account scoping, Cost Explorer query recipes, forecasts, Savings Plans inventory and rates, and auth troubleshooting in every authentication mode.
+description: Use whenever a question is about AWS resources, inventory or spend and the aws MCP server (aws-mcp) is connected — "how many / list / which X do we have", "what does Y cost", "forecast", "what caused this cost anomaly", "savings plans", "why can't you see account Z". Covers choosing between list_resources, count_resources and list_resources_fallback (the Cloud Control fallback that serves almost every type NOT in list_resource_types — NAT gateways, ENIs, KMS keys, IAM roles, ECR, ElastiCache, MSK, OpenSearch, Kinesis, Step Functions, API Gateway, Transit Gateway…), reading the queried/warnings envelope, account scoping, Cost Explorer query recipes, forecasts, Cost Anomaly Detection findings and monitors, Savings Plans inventory and rates, and auth troubleshooting in every authentication mode.
 ---
 
 # Using the aws MCP server
 
 `aws-mcp` is a **read-only** MCP server: AWS inventory across every reachable
-account and region, plus Cost Explorer and Savings Plans. It fans out on the
-server, caches for 6h by default, and returns answers rather than raw API dumps.
+account and region, plus Cost Explorer, Cost Anomaly Detection and Savings
+Plans. It fans out on the server, caches for 6h by default, and returns answers
+rather than raw API dumps.
 No tool writes anything.
 
 This guide ships inside the server binary. The `aws_usage_guide` tool returns
@@ -38,6 +39,8 @@ at `skills/using-aws-mcp/SKILL.md`, and changes with the tools it describes.
 | "What did we spend on…" | `get_cost_and_usage` |
 | "What will we spend…" | `get_cost_forecast` |
 | Exact strings for a cost filter | `list_cost_dimension_values` (vocabulary: `list_cost_dimensions`) |
+| "What caused this cost anomaly", "what spiked" | `list_cost_anomalies` |
+| "Is this spend monitored, who gets alerted" | `list_cost_anomaly_monitors` |
 | "What are we committed to / what expires" | `list_savings_plans` |
 | "What would a commitment cost" | `list_savings_plan_rates` |
 | Auth error, missing account | `aws_auth_status`, then `aws_sso_login` |
@@ -279,6 +282,71 @@ get_cost_and_usage {"period":"last_30_days","account_id":"<payer>","group_by":["
 - **`prediction_interval_level`** (51–99) adds bounds.
 - **Month-end estimate**: `mtd` actuals from `get_cost_and_usage` plus the
   `this_month` forecast. State both numbers.
+
+## Cost anomalies
+
+Cost Anomaly Detection findings, read live (never cached: a running anomaly
+keeps growing). Both tools fan out over every reachable account unless
+`account_id` is given.
+
+### `list_cost_anomalies`
+
+Each item carries the impact (`total`, `max_daily`, actual vs expected spend, in
+USD) and **every** root cause: service, region, usage type, linked account and
+its dollar `contribution`, largest first. The alert email shows only the top
+few, so start here when someone forwards one.
+
+- **The window matches the anomaly's *end* date**, not its start. An anomaly
+  that began before the window but is still running is included.
+- **`period`** defaults to `last_30_days`. Unlike the cost tools, windows that
+  reach today stay open, because today's anomalies are the ones still running.
+  `last_month` and `yesterday` are closed.
+- **`start` / `end`**: `end` is **inclusive** (the cost tools' is exclusive) and
+  optional; `start` alone is an open window.
+- **History is 90 days.** A longer window adds a warning rather than failing.
+- **Filters**:
+  - `min_impact`: USD of total impact.
+  - `feedback`: `YES`, `NO`, `PLANNED_ACTIVITY`, or `none` for anomalies nobody
+    has triaged.
+  - `monitor_arn`, from `list_cost_anomaly_monitors`.
+  - `search`: substring over the monitored value and every root-cause field,
+    e.g. a usage type or account name.
+- **Response**: `items` ranked by total impact, plus a `summary` over *every*
+  match, not just the page: total impact, counts by feedback, and the top
+  root-cause services by summed contribution. Contributions are the model's
+  attribution and need not add up to the total impact.
+- **Accounts**: each row's `account_id` is the account that owns the monitor.
+  The root causes' `linked_account` is where the spend happened. With a
+  management account and its members in the pool, both may report the same
+  spend, so don't add impacts across accounts blindly.
+
+### `list_cost_anomaly_monitors`
+
+The monitors (what each watches: services, linked accounts, a tag or cost
+category, and when it last evaluated), each with its alert subscriptions:
+subscribers, frequency and threshold. An empty list means Cost Anomaly Detection
+is not watching that account at all, so an empty `list_cost_anomalies` there
+proves nothing.
+
+### Investigating an anomaly
+
+1. `list_cost_anomalies` with a window around the alert date (plus `search` or
+   `min_impact` to find it). Note the top root causes.
+2. `get_cost_and_usage` with `granularity: DAILY` over the anomaly's dates,
+   filtered on the root cause's `SERVICE` and `REGION`, grouped by
+   `USAGE_TYPE` (or `LINKED_ACCOUNT`). This shows the shape of the jump and
+   whether it is still going.
+3. Group the same query by a team or workload `TAG:<key>` to attribute it.
+4. Find the resources with `list_resources` / `count_resources` in the linked
+   account and region.
+
+```jsonc
+// Untriaged anomalies over $100 this month
+list_cost_anomalies {"period":"this_month","min_impact":100,"feedback":"none"}
+
+// Anomalies involving S3 in one account's Cost Explorer
+list_cost_anomalies {"period":"last_60_days","search":"Simple Storage","account_id":"<payer>"}
+```
 
 ## Savings Plans
 

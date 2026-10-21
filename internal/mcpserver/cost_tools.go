@@ -267,7 +267,7 @@ func (s *Server) handleGetCostAndUsage(ctx context.Context, req mcp.CallToolRequ
 		return mcp.NewToolResultErrorFromErr("invalid cost query", err), nil
 	}
 
-	repos, err := s.costRepositories(ctx, req.GetString("account_id", ""))
+	repos, err := s.costRepositories(ctx, req.GetString("account_id", ""), true)
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to initialise aws client", err), nil
 	}
@@ -347,7 +347,7 @@ func (s *Server) handleGetCostForecast(ctx context.Context, req mcp.CallToolRequ
 		input.PredictionIntervalLevel = aws.Int32(intervalLevel)
 	}
 
-	repos, err := s.costRepositories(ctx, req.GetString("account_id", ""))
+	repos, err := s.costRepositories(ctx, req.GetString("account_id", ""), true)
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to initialise aws client", err), nil
 	}
@@ -434,7 +434,7 @@ func (s *Server) handleListCostDimensionValues(ctx context.Context, req mcp.Call
 		input.SearchString = aws.String(search)
 	}
 
-	repos, err := s.costRepositories(ctx, req.GetString("account_id", ""))
+	repos, err := s.costRepositories(ctx, req.GetString("account_id", ""), true)
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to initialise aws client", err), nil
 	}

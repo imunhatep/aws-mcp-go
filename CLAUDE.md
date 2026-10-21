@@ -22,7 +22,7 @@ Version/commit are injected at build time via `-ldflags` into `internal/version`
 
 ### awslib dependency
 
-`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.12.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
+`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.13.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
 
 The repo vendors its dependencies (`vendor/`), so run `go mod tidy && go mod vendor` after any dependency change or the build fails with "inconsistent vendoring". `vendor/` is gitignored — it is a local build input, not committed state.
 
@@ -41,7 +41,7 @@ Request flow, outermost to innermost:
 
 - `cmd/aws-mcp/main.go` → `internal.NewApp()` (root `urfave/cli/v3` command, global `--verbose`/`zerolog` setup) → attaches `command.ServeCommand` and `command.VersionCommand`.
 - `internal/command/serve.go` is the composition root for `serve`: parses flags into `internal/config.Config`, builds the SSO login manager, builds the client pool (lazily — see below), builds the cache, then `mcpserver.NewServer(...).WithAuth(...)` + `ServeHTTP` (streamable-HTTP transport, endpoint `/mcp`).
-- `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools, `registerAuthTools()` (in `auth_tools.go`) for `aws_auth_status` / `aws_sso_login`, `registerSavingsPlansTools()` (in `savingsplans_tools.go`) for the Savings Plans tools, and `registerGuideTools()` (in `guide.go`) for `aws_usage_guide`; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go` and the Savings Plans ones in `savingsplans.go`.
+- `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools, `registerAnomalyTools()` (in `anomaly_tools.go`) for the Cost Anomaly Detection tools, `registerAuthTools()` (in `auth_tools.go`) for `aws_auth_status` / `aws_sso_login`, `registerSavingsPlansTools()` (in `savingsplans_tools.go`) for the Savings Plans tools, and `registerGuideTools()` (in `guide.go`) for `aws_usage_guide`; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go` and the Savings Plans ones in `savingsplans.go`.
 
 ### The ClientPool abstraction (why the auth modes are transparent)
 
@@ -130,6 +130,20 @@ Cost Explorer is a billing API, not an inventory one, so it bypasses the resourc
 **Validation happens before AWS is touched.** Cost Explorer bills per request, so `handleGetCostAndUsage` parses everything and calls `CostQuery.Validate()` (awslib's — it catches the match options `GetCostAndUsage` rejects, and the 2-grouping cap) *before* `costRepositories`, so a bad query is not sent once per account. `TestCostToolsValidateBeforeCallingAWS` pins this with a nil ClientPool that would panic if a handler reached for it.
 
 **Result shaping.** `buildCostResult` returns groups aggregated over the whole window (ranked by the first metric, truncated to `limit`) *and* the same data split by period. Two details worth keeping: with a `group_by` set the API leaves `ResultByTime.Total` empty, so totals are summed from the groups instead; and tag/cost-category group keys come back as `<key>$<value>`, which `costAccumulator.groupKeys` unwraps (empty value → `(not set)`).
+
+### Cost Anomaly Detection data path (`anomaly.go`, `anomaly_tools.go`)
+
+`list_cost_anomalies` (`GetAnomaliesByQuery`) and `list_cost_anomaly_monitors` (`GetAnomalyMonitors` + `GetAnomalySubscriptions`) come from the same awslib `CostExplorerRepository`, so they reuse `costRepositories` — and with it the `poolClients` account scoping and the `DefaultAwsRegion`-only client request. The local `costRepository` interface carries the three anomaly methods alongside the cost ones. Upstream's notes are in awslib's `docs/costexplorer.md` ("Cost anomalies").
+
+Things worth keeping:
+
+- **Uncached** (`costRepositories(..., cached=false)`). Unlike closed-period spend, a running anomaly keeps moving its end date and impact, and new ones appear; awslib's own docs warn against caching open-ended anomaly queries. The cost tools pass `cached=true`.
+- **The window matches the anomaly's *end* date and `end` is inclusive** — both API facts, and both opposite to the cost tools. `resolveAnomalyWindow` reuses the cost period vocabulary but leaves any window that reaches today *open* (`last_<n>_days` included), because closing it at yesterday as the cost tools do would hide exactly the anomalies still running. Closed periods (`last_month`, `yesterday`) end on their last day, inclusive. A window older than the 90-day retention adds a warning, not an error.
+- **Validation before AWS**, as for the cost tools: period, feedback, monitor ARN shape and `min_impact` are checked and `AnomalyQuery.Validate()` runs before `costRepositories`. `TestAnomalyToolsValidateBeforeCallingAWS` uses the nil-pool tripwire.
+- **`feedback=none` is a client-side filter** — the API can filter on a given feedback but not on its absence, and "what has nobody triaged" is the question. `search` is client-side too; `min_impact`, `feedback` (other values) and `monitor_arn` go to the API.
+- **Partial failure is a warning, total failure an error** (`collectAnomalies`), the same rule as Savings Plans inventory. Monitors without readable subscriptions are still returned, with a warning.
+- **Every root cause is kept**, sorted by contribution — the reason to use the API over the alert email. The `summary` covers every match, not the truncated page. Row `account_id` is the monitor owner; the root cause `linked_account` is where the spend happened.
+- The write side (`ProvideAnomalyFeedback`, monitor/subscription CRUD) is not exposed: the server is read-only.
 
 ### Savings Plans data path (`savingsplans.go`, `savingsplans_tools.go`)
 

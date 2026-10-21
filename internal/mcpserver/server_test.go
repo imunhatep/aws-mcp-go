@@ -59,6 +59,7 @@ func TestListTools(t *testing.T) {
 		"list_resource_types", "list_regions", "list_accounts", "list_resources", "count_resources",
 		"list_resources_fallback",
 		"get_cost_and_usage", "get_cost_forecast", "list_cost_dimension_values", "list_cost_dimensions",
+		"list_cost_anomalies", "list_cost_anomaly_monitors",
 		"aws_auth_status", "aws_sso_login",
 		"list_savings_plans", "list_savings_plan_rates",
 	} {

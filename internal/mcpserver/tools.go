@@ -141,6 +141,7 @@ func (s *Server) registerTools() {
 	)
 
 	s.registerCostTools()
+	s.registerAnomalyTools()
 	s.registerAuthTools()
 	s.registerSavingsPlansTools()
 	s.registerGuideTools()

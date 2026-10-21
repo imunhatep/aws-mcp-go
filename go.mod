@@ -14,7 +14,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.339.0
 	github.com/aws/aws-sdk-go-v2/service/savingsplans v1.40.4
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.4
-	github.com/imunhatep/awslib v0.12.0
+	github.com/imunhatep/awslib v0.13.0
 	github.com/imunhatep/gocollection v0.2.1
 	github.com/mark3labs/mcp-go v1.3.0
 	github.com/rs/zerolog v1.35.1

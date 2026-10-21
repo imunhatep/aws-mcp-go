@@ -43,6 +43,10 @@ type costRepository interface {
 	GetCostAndUsageByQuery(q costexplorer.CostQuery) (*costexplorer.CostAndUsage, error)
 	GetCostForecast(query *awsce.GetCostForecastInput) (*awsce.GetCostForecastOutput, error)
 	GetDimensionValues(query *awsce.GetDimensionValuesInput) ([]cetypes.DimensionValuesWithAttributes, error)
+
+	GetAnomaliesByQuery(q costexplorer.AnomalyQuery) ([]cetypes.Anomaly, error)
+	GetAnomalyMonitors(query *awsce.GetAnomalyMonitorsInput) ([]cetypes.AnomalyMonitor, error)
+	GetAnomalySubscriptions(query *awsce.GetAnomalySubscriptionsInput) ([]cetypes.AnomalySubscription, error)
 }
 
 // accountCostRepository pairs a repository with the account it reports on, so
@@ -61,7 +65,11 @@ type accountCostRepository struct {
 //
 // Scoping goes through poolClients, so an account_id never builds clients for
 // the other accounts in the pool; the id check in the loop is only a guard.
-func (s *Server) costRepositories(ctx context.Context, accountID string) ([]accountCostRepository, error) {
+//
+// cached selects the caching wrapper. Spend for a closed period never changes
+// and caches well; anomaly findings do not — a running anomaly keeps moving its
+// end date and impact, and a new one can appear at any time — see the call sites.
+func (s *Server) costRepositories(ctx context.Context, accountID string, cached bool) ([]accountCostRepository, error) {
 	accountID = strings.TrimSpace(accountID)
 
 	clients, err := s.poolClients(ctx, accountID, []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
@@ -83,7 +91,7 @@ func (s *Server) costRepositories(ctx context.Context, accountID string) ([]acco
 		seen[id] = true
 
 		repo := costexplorer.NewCostExplorerRepository(s.ctx, client)
-		if s.cache != nil {
+		if cached && s.cache != nil {
 			repos = append(repos, accountCostRepository{accountID: id, repo: repo.WithCache(s.cache)})
 			continue
 		}
