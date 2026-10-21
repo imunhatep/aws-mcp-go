@@ -8,6 +8,7 @@
 | `list_resources` | `resource_type` (required), `region`, `account_id`, `view`, `state`, `tag`, `attribute`, `limit`, `cursor` | List resources of a type across accounts/regions (paginated) |
 | `count_resources` | `resource_type` (required), `group_by`, `region`, `account_id`, `state`, `tag`, `attribute` | Aggregate resources into group counts |
 | `list_resources_fallback` | `resource_type` (required), `region`, `account_id`, `view`, `state`, `tag`, `attribute`, `limit`, `cursor` | Last resort for types `list_resources` does not support, via the Cloud Control API |
+| `aws_usage_guide` | `topic` | The agent-facing usage guide ([`skills/using-aws-mcp/SKILL.md`](../skills/using-aws-mcp/SKILL.md), embedded in the binary), whole or one section. No AWS calls |
 | `aws_auth_status` | `profile` | Credential state per profile: mechanism, account, usability, SSO token expiry, logins in progress. Local files only — answers while AWS is unusable |
 | `aws_sso_login` | `profile` | Starts (or picks up) an SSO device-authorization flow and returns the verification URL and user code for the user to approve |
 | `list_savings_plans` | `plan_type`, `state`, `region`, `instance_family`, `expiring_within_days`, `account_id`, `limit` | Purchased Savings Plans with commitment, term and time remaining. Defaults to active plans; read live, not cached |

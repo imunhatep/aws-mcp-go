@@ -62,12 +62,12 @@ func writeSharedConfig(t *testing.T, content string) {
 // instead of an explanation. Startup must succeed regardless.
 func TestBuildClientPoolSurvivesBrokenProfile(t *testing.T) {
 	writeSharedConfig(t, `
-[sso-session evo]
+[sso-session corp]
 sso_start_url = https://example.awsapps.com/start
 sso_region = eu-central-1
 
 [profile dev]
-sso_session = evo
+sso_session = corp
 sso_account_id = 111111111111
 sso_role_name = readonly
 `)
@@ -83,7 +83,7 @@ sso_role_name = readonly
 	_, err = pool.GetClients(ptypes.DefaultAwsRegion)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "dev")
-	assert.Contains(t, err.Error(), "aws sso login --sso-session evo")
+	assert.Contains(t, err.Error(), "aws sso login --sso-session corp")
 }
 
 // TestBuildClientPoolDefersLocalMode: local and assume-role modes are wrapped in
@@ -113,4 +113,23 @@ func TestBuildClientPoolStillRejectsBadFlags(t *testing.T) {
 	_, err = buildClientPool(context.Background(), &config.Config{Addr: ":3040", Profiles: "dev,dev"}, nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "duplicate aws profile")
+}
+
+func TestBindsAllInterfaces(t *testing.T) {
+	// Forwarded credentials travel in a request header, so the operator is
+	// warned whenever plain HTTP is reachable from beyond the machine.
+	cases := map[string]bool{
+		":3040":          true,
+		"0.0.0.0:3040":   true,
+		"[::]:3040":      true,
+		"10.0.0.5:3040":  true,
+		"127.0.0.1:3040": false,
+		"[::1]:3040":     false,
+		"localhost:3040": false,
+		"not-an-address": true,
+	}
+
+	for addr, want := range cases {
+		assert.Equal(t, want, bindsAllInterfaces(addr), addr)
+	}
 }

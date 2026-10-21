@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -97,12 +98,12 @@ func (c *regionCache) put(accountID ptypes.AwsAccountID, regions map[ptypes.AwsR
 //
 // Whatever it does is stated in the returned notes. Narrowing that the caller
 // cannot see is indistinguishable from an estate that is smaller than it is.
-func (s *Server) narrowRegions(regions []ptypes.AwsRegion, regionArg, accountID string) ([]ptypes.AwsRegion, []string) {
+func (s *Server) narrowRegions(ctx context.Context, regions []ptypes.AwsRegion, regionArg, accountID string) ([]ptypes.AwsRegion, []string) {
 	if regionArg != "" || len(regions) <= 1 {
 		return regions, nil
 	}
 
-	enabled, err := s.enabledRegions(accountID)
+	enabled, err := s.enabledRegions(ctx, accountID)
 	if err != nil {
 		log.Warn().Err(err).Msg("[mcpserver.narrowRegions] falling back to every known region")
 
@@ -160,15 +161,15 @@ func namedRegions(regions []string) string {
 // would be tighter, but the pool's fan-out takes one region list for every
 // account, and a client that fails for an account that lacks the region is
 // exactly what v3.FailureCache already makes cheap.
-func (s *Server) enabledRegions(accountID string) (map[ptypes.AwsRegion]struct{}, error) {
-	if s.pool == nil {
+func (s *Server) enabledRegions(ctx context.Context, accountID string) (map[ptypes.AwsRegion]struct{}, error) {
+	if s.pool == nil && s.passthrough == nil {
 		return nil, errors.Errorf("no client pool configured")
 	}
 
 	// One client per account, in the region every account has: enough to ask
 	// each account what it has enabled, without building the matrix this call
 	// exists to shrink.
-	clients, err := s.poolClients(accountID, []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
+	clients, err := s.poolClients(ctx, accountID, []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

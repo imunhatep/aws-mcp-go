@@ -8,7 +8,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/client"
 	"github.com/mark3labs/mcp-go/mcp"
-	"github.com/mark3labs/mcp-go/server"
+	"github.com/mark3labs/mcp-go/server/servertest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -23,7 +23,7 @@ func startTestServer(t *testing.T) (*client.Client, context.Context) {
 	t.Helper()
 
 	srv := mcpserver.NewServer(context.Background(), nil, nil)
-	testServer := server.NewTestStreamableHTTPServer(srv.MCPServer())
+	testServer := servertest.NewTestStreamableHTTPServer(srv.MCPServer())
 	t.Cleanup(testServer.Close)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

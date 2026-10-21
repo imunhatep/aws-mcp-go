@@ -142,7 +142,7 @@ func (s *Server) handleListSavingsPlans(ctx context.Context, req mcp.CallToolReq
 	// Inventory is read live: this tool answers "what are we committed to right
 	// now", and the resource cache's default 6h window would answer a different
 	// question than the one asked.
-	repos, err := s.savingsPlansRepositories(req.GetString("account_id", ""), false)
+	repos, err := s.savingsPlansRepositories(ctx, req.GetString("account_id", ""), false)
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to initialise aws client", err), nil
 	}
@@ -322,7 +322,7 @@ func (s *Server) handleListSavingsPlanRates(ctx context.Context, req mcp.CallToo
 	// Rates are published prices, identical whichever account asks, so only one
 	// repository is used — fanning out would return the same price list once per
 	// account. They cache well, unlike inventory.
-	repos, err := s.savingsPlansRepositories(req.GetString("account_id", ""), true)
+	repos, err := s.savingsPlansRepositories(ctx, req.GetString("account_id", ""), true)
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to initialise aws client", err), nil
 	}

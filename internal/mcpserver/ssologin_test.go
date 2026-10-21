@@ -107,7 +107,7 @@ func newTestLoginManager(t *testing.T, oidc *fakeOIDC) *SSOLoginManager {
 func testSSOAuth() ProfileAuth {
 	return ProfileAuth{
 		Name:        "dev",
-		SSOSession:  "evo",
+		SSOSession:  "corp",
 		SSOStartURL: "https://example.awsapps.com/start",
 		SSORegion:   "eu-central-1",
 	}
@@ -168,7 +168,7 @@ func TestSSOLoginReusesPendingFlow(t *testing.T) {
 
 	second, err := m.Begin(ProfileAuth{
 		Name:        "prod",
-		SSOSession:  "evo",
+		SSOSession:  "corp",
 		SSOStartURL: "https://example.awsapps.com/start",
 		SSORegion:   "eu-central-1",
 	})
@@ -228,7 +228,7 @@ func TestExplainOnlyLoginsForCredentialFailures(t *testing.T) {
 	// The failure is still reported — it just now carries the way out of it.
 	assert.Contains(t, expired.Error(), "expired")
 	assert.Contains(t, expired.Error(), "ABCD-EFGH")
-	assert.Contains(t, expired.Error(), "aws sso login --sso-session evo")
+	assert.Contains(t, expired.Error(), "aws sso login --sso-session corp")
 }
 
 // TestExplainWithAutoLoginDisabled: the flag governs automatic starts only, and
@@ -241,7 +241,7 @@ func TestExplainWithAutoLoginDisabled(t *testing.T) {
 	err := m.Explain(testSSOAuth(), errors.New("cached SSO token is expired"))
 	require.Error(t, err)
 
-	assert.Contains(t, err.Error(), "aws sso login --sso-session evo")
+	assert.Contains(t, err.Error(), "aws sso login --sso-session corp")
 	assert.NotContains(t, err.Error(), "ABCD-EFGH")
 
 	register, _, _ := oidc.counts()
@@ -263,7 +263,7 @@ func TestNilLoginManagerIsUsable(t *testing.T) {
 
 	err := m.Explain(testSSOAuth(), errors.New("cached SSO token is expired"))
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "aws sso login --sso-session evo")
+	assert.Contains(t, err.Error(), "aws sso login --sso-session corp")
 
 	_, beginErr := m.Begin(testSSOAuth())
 	assert.Error(t, beginErr)

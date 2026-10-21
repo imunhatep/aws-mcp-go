@@ -46,6 +46,11 @@ Then point your client at it:
 claude mcp add --transport http aws http://127.0.0.1:3040/mcp
 ```
 
+Prefer to keep AWS config and the SSO cache off the server entirely? Run it with
+`--credentials-passthrough` and let Claude Code forward your locally resolved
+credentials with each request — see
+[credential passthrough](docs/authentication.md#credential-passthrough--the-client-forwards-its-own-credentials).
+
 Startup validates every profile before serving, so a missing or expired SSO
 login fails immediately with the command that fixes it — not on the first
 question you ask.
@@ -62,6 +67,7 @@ question you ask.
 | `get_cost_forecast` | "What will we spend …" |
 | `list_cost_dimensions`, `list_cost_dimension_values` | The cost vocabulary, and the exact strings filters need |
 | `aws_auth_status`, `aws_sso_login` | "why can't you see my account" — credential state, and an SSO login the agent can walk the user through |
+| `aws_usage_guide` | How to use all of the above — the agent-facing guide, whole or by topic |
 | `list_savings_plans` | "what are we committed to" — purchased Savings Plans, hourly commitment, terms, what expires next |
 | `list_savings_plan_rates` | "what would a commitment cost" — published Savings Plan rates per region, term and payment option |
 
@@ -78,11 +84,19 @@ are often absent, and its `detail` view costs one extra AWS call per resource �
 so prefer `list_resources` whenever the type is supported. See
 [Resource tools](docs/tools.md#list_resources_fallback--types-with-no-dedicated-support).
 
+**Agents get told how to use it.** The server sends short instructions when a
+client connects; Claude Code puts them in the system prompt. They cover the
+rules that matter most, like reaching for the fallback rather than calling a
+type unsupported. The full guide comes from `aws_usage_guide`. It lives at
+[`skills/using-aws-mcp/SKILL.md`](skills/using-aws-mcp/SKILL.md) and is built
+into the binary, so it always matches the server version. The same file also
+works as a standalone Claude Code skill.
+
 ## Documentation
 
 | Guide | Contents |
 |-------|----------|
-| [Authentication](docs/authentication.md) | Local, multi-profile and assume-role modes; the startup credential checks |
+| [Authentication](docs/authentication.md) | Local, multi-profile, assume-role and credential-passthrough modes; the startup credential checks |
 | [Running in a container](docs/container.md) | Multi-account AWS SSO with podman, image builds, cache volumes, troubleshooting |
 | [Resource tools](docs/tools.md) | `list_resources` views/filters/pagination, `count_resources` aggregation, `list_resources_fallback` for unsupported types |
 | [Cost Explorer](docs/cost-explorer.md) | Periods, groupings, filter shape, response layout, per-request billing |

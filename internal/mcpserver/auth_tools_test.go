@@ -37,17 +37,17 @@ func callAuthTool(t *testing.T, handler func(context.Context, mcp.CallToolReques
 // unusable — that is its entire reason to exist — so it reads only local files.
 func TestAuthStatusReportsExpiredProfile(t *testing.T) {
 	writeSharedConfig(t, `
-[sso-session evo]
+[sso-session corp]
 sso_start_url = https://example.awsapps.com/start
 sso_region = eu-central-1
 
 [profile dev]
-sso_session = evo
+sso_session = corp
 sso_account_id = 111111111111
 sso_role_name = readonly
 region = eu-central-1
 `)
-	writeTokenCache(t, "evo", time.Now().Add(-time.Hour))
+	writeTokenCache(t, "corp", time.Now().Add(-time.Hour))
 
 	srv := NewServer(context.Background(), nil, nil).WithAuth(nil, []string{"dev"})
 
@@ -61,8 +61,8 @@ region = eu-central-1
 	assert.Equal(t, "dev", profile["profile"])
 	assert.Equal(t, "sso", profile["mechanism"])
 	assert.Equal(t, "111111111111", profile["account_id"])
-	assert.Equal(t, "evo", profile["sso_session"])
-	assert.Equal(t, "aws sso login --sso-session evo", profile["login_hint"])
+	assert.Equal(t, "corp", profile["sso_session"])
+	assert.Equal(t, "aws sso login --sso-session corp", profile["login_hint"])
 
 	token := profile["sso_token"].(map[string]any)
 	assert.Equal(t, true, token["found"])
@@ -89,12 +89,12 @@ func TestAuthStatusRejectsUnknownProfile(t *testing.T) {
 // relays to the human, so the URL and the code must be in it.
 func TestSSOLoginToolReturnsVerificationURL(t *testing.T) {
 	writeSharedConfig(t, `
-[sso-session evo]
+[sso-session corp]
 sso_start_url = https://example.awsapps.com/start
 sso_region = eu-central-1
 
 [profile dev]
-sso_session = evo
+sso_session = corp
 sso_account_id = 111111111111
 sso_role_name = readonly
 `)
@@ -111,7 +111,7 @@ sso_role_name = readonly
 	require.Len(t, logins, 1)
 
 	entry := logins[0].(map[string]any)
-	assert.Equal(t, "evo", entry["sso_session"])
+	assert.Equal(t, "corp", entry["sso_session"])
 	assert.Equal(t, "pending", entry["state"])
 	assert.Equal(t, "ABCD-EFGH", entry["user_code"])
 	assert.Contains(t, entry["verification_uri_complete"], "user_code=ABCD-EFGH")

@@ -58,8 +58,12 @@ type profileStatusDTO struct {
 	SSOSession    string    `json:"sso_session,omitempty"`
 	Authenticated bool      `json:"authenticated"`
 	Token         *tokenDTO `json:"sso_token,omitempty"`
-	LoginHint     string    `json:"login_hint,omitempty"`
-	Error         string    `json:"error,omitempty"`
+	// CredentialsExpireAt / CredentialsValidFor describe forwarded credentials
+	// in passthrough mode, which carry their own expiry.
+	CredentialsExpireAt string `json:"credentials_expire_at,omitempty"`
+	CredentialsValidFor string `json:"credentials_valid_for,omitempty"`
+	LoginHint           string `json:"login_hint,omitempty"`
+	Error               string `json:"error,omitempty"`
 }
 
 // tokenDTO is the cached SSO token's state, with no secret in it.
@@ -95,7 +99,12 @@ func (s *Server) handleAuthStatus(ctx context.Context, req mcp.CallToolRequest) 
 		Profiles:  []profileStatusDTO{},
 	}
 
-	for _, state := range s.profileStates() {
+	states, err := s.profileStates(ctx)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("no credential state to report", err), nil
+	}
+
+	for _, state := range states {
 		if wanted != "" && state.Auth.Name != wanted {
 			continue
 		}
@@ -107,6 +116,11 @@ func (s *Server) handleAuthStatus(ctx context.Context, req mcp.CallToolRequest) 
 		result.Mode = "profiles"
 	}
 
+	if s.passthrough != nil {
+		result.Mode = "passthrough"
+		result.AutoLogin = false
+	}
+
 	if wanted != "" && len(result.Profiles) == 0 {
 		return mcp.NewToolResultErrorf("profile %q is not served by this server; call aws_auth_status with no argument for the configured profiles", wanted), nil
 	}
@@ -115,7 +129,10 @@ func (s *Server) handleAuthStatus(ctx context.Context, req mcp.CallToolRequest) 
 		result.Logins = append(result.Logins, loginStatus(login))
 	}
 
-	if !result.AutoLogin {
+	switch {
+	case s.passthrough != nil:
+		result.Note = "credentials are forwarded by the MCP client on every request; the server cannot log in. To renew, run each profile's login_hint on the client machine, then reconnect the MCP server so its headers helper exports fresh credentials"
+	case !result.AutoLogin:
 		result.Note = "automatic SSO login is disabled (--sso-auto-login=false); aws_sso_login still starts one on request"
 	}
 
@@ -125,7 +142,17 @@ func (s *Server) handleAuthStatus(ctx context.Context, req mcp.CallToolRequest) 
 func (s *Server) handleSSOLogin(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	wanted := strings.TrimSpace(req.GetString("profile", ""))
 
-	states := s.profileStates()
+	// In passthrough mode the SSO cache that matters is on the client machine,
+	// which the server cannot write to — so the login has to happen there.
+	if s.passthrough != nil {
+		return passthroughLoginResult(ctx), nil
+	}
+
+	states, err := s.profileStates(ctx)
+	if err != nil {
+		return mcp.NewToolResultErrorFromErr("no credential state to report", err), nil
+	}
+
 	logins := []loginDTO{}
 	skipped := []string{}
 	found := false
@@ -172,12 +199,35 @@ func (s *Server) handleSSOLogin(ctx context.Context, req mcp.CallToolRequest) (*
 	})
 }
 
+// passthroughLoginResult tells the agent how a login works when the server only
+// relays credentials: on the client machine, followed by a reconnect.
+func passthroughLoginResult(ctx context.Context) *mcp.CallToolResult {
+	hints := []string{"aws sso login --profile <name>"}
+
+	if req, ok := passthroughFromContext(ctx); ok && req.creds != nil {
+		hints = req.creds.loginHints()
+	}
+
+	return mcp.NewToolResultErrorf("this server runs in credential-passthrough mode: AWS credentials come from the MCP client's headers helper, so the server cannot log in on anyone's behalf. Ask the user to run on their machine: %s — then reconnect the MCP server (in Claude Code: /mcp, select the server, Reconnect) so the helper exports fresh credentials, and retry", strings.Join(hints, " ; "))
+}
+
 // profileStates returns the authentication state of every profile this server
-// serves. In profile mode the pool knows it; otherwise there is one implicit
+// serves. In profile mode the pool knows it; in passthrough mode it is the pool
+// for the credentials this request forwarded; otherwise there is one implicit
 // profile — whatever the default credential chain lands on.
-func (s *Server) profileStates() []ProfileState {
+func (s *Server) profileStates(ctx context.Context) ([]ProfileState, error) {
+	if s.passthrough != nil {
+		pool, err := s.clientPool(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		// Always a ProfilePool: PassthroughPools builds nothing else.
+		return pool.(*ProfilePool).Profiles(), nil
+	}
+
 	if pool, ok := s.pool.(*ProfilePool); ok {
-		return pool.Profiles()
+		return pool.Profiles(), nil
 	}
 
 	name := os.Getenv("AWS_PROFILE")
@@ -203,7 +253,7 @@ func (s *Server) profileStates() []ProfileState {
 		state.Authenticated = true
 	}
 
-	return []ProfileState{state}
+	return []ProfileState{state}, nil
 }
 
 // profileStatus renders one profile's state, reading the cached SSO token to
@@ -225,6 +275,23 @@ func profileStatus(state ProfileState) profileStatusDTO {
 
 	if dto.AccountID == "" && state.Auth.SSOAccountID != "" {
 		dto.AccountID = state.Auth.SSOAccountID
+	}
+
+	// Forwarded credentials have no local SSO token to inspect; what they have
+	// is their own expiry, and a renewal command that runs on the client.
+	if state.Passthrough {
+		dto.Mechanism = "passthrough"
+		dto.LoginHint = state.LoginHint
+
+		if !state.Expires.IsZero() {
+			dto.CredentialsExpireAt = state.Expires.UTC().Format(time.RFC3339)
+
+			if remaining := time.Until(state.Expires); remaining > 0 {
+				dto.CredentialsValidFor = remaining.Truncate(time.Second).String()
+			}
+		}
+
+		return dto
 	}
 
 	if !state.Auth.IsSSO() {

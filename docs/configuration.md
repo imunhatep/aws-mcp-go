@@ -6,6 +6,7 @@
 |---------|-------------|
 | `serve` | Run the MCP server (streamable HTTP, served at `/mcp`) |
 | `version` | Print version and commit |
+| `credentials-headers` | Client side of [credential passthrough](authentication.md#credential-passthrough--the-client-forwards-its-own-credentials): print local AWS credentials as the `X-Aws-Credentials` header, for use as an MCP `headersHelper` |
 
 ## `serve` flags
 
@@ -18,6 +19,7 @@
 | `--profiles` | `MCP_AWS_PROFILES` | | Comma-separated AWS shared-config profiles to serve, one account each (excludes the assume-role flags) |
 | `--assume-role` | | `false` | Auto-discover assumable roles from the current IAM role |
 | `--assume-role-arns` | `MCP_ASSUME_ROLE_ARNS` | | Explicit assumable role ARNs (implies assume-role mode) |
+| `--credentials-passthrough` | `MCP_CREDENTIALS_PASSTHROUGH` | `false` | Hold no AWS credentials; use only those each request forwards in `X-Aws-Credentials` (excludes `--profiles` and the assume-role flags) |
 | `--sso-auto-login` | `MCP_SSO_AUTO_LOGIN` | `true` | On an expired-beyond-refresh SSO session, start a device-authorization flow and return its URL and user code in the failing tool result |
 | `--sso-open-browser` | `MCP_SSO_OPEN_BROWSER` | `true` | Also open that URL locally; best-effort, skipped in a container |
 | `--verbose` / `-v` | `AWS_MCP_VERBOSE`, `LOG_LEVEL` | `3` | Log verbosity: `0`=fatal … `5`=trace (global flag) |
@@ -47,6 +49,14 @@ Claude Code:
 
 ```sh
 claude mcp add --transport http aws http://127.0.0.1:3040/mcp
+```
+
+With [credential passthrough](authentication.md#credential-passthrough--the-client-forwards-its-own-credentials)
+(`serve --credentials-passthrough`), also register a `headersHelper`. `claude mcp add`
+has no flag for it, so use `add-json`:
+
+```sh
+claude mcp add-json --scope user aws '{"type":"http","url":"http://127.0.0.1:3040/mcp","headersHelper":"/usr/local/bin/aws-mcp credentials-headers --profiles dev,prod"}'
 ```
 
 Generic MCP client config:

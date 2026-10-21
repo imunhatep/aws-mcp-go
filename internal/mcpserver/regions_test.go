@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -60,7 +61,7 @@ func TestNarrowToEnabled(t *testing.T) {
 func TestNarrowRegionsHonoursExplicitRegion(t *testing.T) {
 	srv := &Server{regions: newRegionCache(time.Hour)}
 
-	regions, warnings := srv.narrowRegions([]ptypes.AwsRegion{"eu-central-1"}, "eu-central-1", "")
+	regions, warnings := srv.narrowRegions(context.Background(), []ptypes.AwsRegion{"eu-central-1"}, "eu-central-1", "")
 
 	assert.Equal(t, []ptypes.AwsRegion{"eu-central-1"}, regions)
 	assert.Empty(t, warnings)
@@ -76,7 +77,7 @@ func TestNarrowRegionsFailsOpen(t *testing.T) {
 	srv := &Server{pool: spy, regions: newRegionCache(time.Hour)}
 
 	requested := ptypes.GetAwsRegionList()
-	regions, warnings := srv.narrowRegions(requested, "", "")
+	regions, warnings := srv.narrowRegions(context.Background(), requested, "", "")
 
 	assert.Len(t, regions, len(requested), "every region must still be queried")
 	require.Len(t, warnings, 1, "the caller must be told the estate was not narrowed")
@@ -89,7 +90,7 @@ func TestNarrowRegionsWithoutPool(t *testing.T) {
 	srv := &Server{regions: newRegionCache(time.Hour)}
 
 	requested := ptypes.GetAwsRegionList()
-	regions, warnings := srv.narrowRegions(requested, "", "")
+	regions, warnings := srv.narrowRegions(context.Background(), requested, "", "")
 
 	assert.Len(t, regions, len(requested))
 	assert.Len(t, warnings, 1)

@@ -22,13 +22,13 @@ Version/commit are injected at build time via `-ldflags` into `internal/version`
 
 ### awslib dependency
 
-`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.9.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
+`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.12.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
 
 The repo vendors its dependencies (`vendor/`), so run `go mod tidy && go mod vendor` after any dependency change or the build fails with "inconsistent vendoring". `vendor/` is gitignored — it is a local build input, not committed state.
 
 ### CI / releases (`.github/workflows`)
 
-`ci.yml` (push to `master`/`main`, PRs, manual) runs a gofmt check over `cmd internal pkg`, `go vet`, `go test -race`, `make build`, and a container build that is not pushed. `release.yml` (on `v*` tags) builds the `darwin,linux` × `amd64,arm64` tarballs plus `checksums.txt` for a GitHub release, and pushes a `linux/amd64,linux/arm64` image to `ghcr.io/${{ github.repository }}` with `GITHUB_TOKEN` (semver + `latest` tags via `docker/metadata-action`).
+`ci.yml` (push to `master`/`main`, PRs, manual) runs a gofmt check over `cmd internal pkg skills`, `go vet`, `go test -race`, `make build`, and a container build that is not pushed. `release.yml` (on `v*` tags) builds the `darwin,linux` × `amd64,arm64` tarballs plus `checksums.txt` for a GitHub release, and pushes a `linux/amd64,linux/arm64` image to `ghcr.io/${{ github.repository }}` with `GITHUB_TOKEN` (semver + `latest` tags via `docker/metadata-action`).
 
 Two things to know about both workflows:
 
@@ -41,11 +41,11 @@ Request flow, outermost to innermost:
 
 - `cmd/aws-mcp/main.go` → `internal.NewApp()` (root `urfave/cli/v3` command, global `--verbose`/`zerolog` setup) → attaches `command.ServeCommand` and `command.VersionCommand`.
 - `internal/command/serve.go` is the composition root for `serve`: parses flags into `internal/config.Config`, builds the SSO login manager, builds the client pool (lazily — see below), builds the cache, then `mcpserver.NewServer(...).WithAuth(...)` + `ServeHTTP` (streamable-HTTP transport, endpoint `/mcp`).
-- `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools, `registerAuthTools()` (in `auth_tools.go`) for `aws_auth_status` / `aws_sso_login`, and `registerSavingsPlansTools()` (in `savingsplans_tools.go`) for the Savings Plans tools; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go` and the Savings Plans ones in `savingsplans.go`.
+- `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools, `registerAuthTools()` (in `auth_tools.go`) for `aws_auth_status` / `aws_sso_login`, `registerSavingsPlansTools()` (in `savingsplans_tools.go`) for the Savings Plans tools, and `registerGuideTools()` (in `guide.go`) for `aws_usage_guide`; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go` and the Savings Plans ones in `savingsplans.go`.
 
 ### The ClientPool abstraction (why the auth modes are transparent)
 
-`mcpserver.ClientPool` (server.go) is a **local interface** with just `GetClients` + `ListAccountIDs`. Three implementations satisfy it, and `buildClientPool` in `serve.go` picks one:
+`mcpserver.ClientPool` (server.go) is a **local interface** with just `GetClients` + `ListAccountIDs`. Three implementations satisfy it, and `buildClientPool` in `serve.go` picks one (a fourth mode, credential passthrough, builds a pool per request instead — see below):
 
 - **Local mode** (default) → `provider.NewClientPool` — single account from the default AWS credential chain (SSO, `AWS_PROFILE`, env, IMDS), wrapped in `mcpserver.LazyPool`.
 - **Multi-profile mode** (`--profiles`) → `mcpserver.NewProfilePool` (`profilepool.go`, this repo's own implementation) — one account per named AWS shared-config profile.
@@ -61,6 +61,16 @@ The modes are mutually exclusive — `config.Validate` rejects `--profiles` comb
 - **Dedupe by `(accountID, region)`** in `GetClients` — two profiles can point at the same account, and `fetchResources` fans out over every client without deduplicating, so duplicates would double rows and inflate counts.
 
 The rest of the server never branches on auth mode — it only sees the interface.
+
+### Credential passthrough (`passthrough.go`)
+
+`--credentials-passthrough` is the fourth, exclusive mode: the server holds **no** credentials, `s.pool` is nil, and every request brings its own in the `X-Aws-Credentials` header (base64url JSON, `PassthroughCredentials`). The client half is `aws-mcp credentials-headers` (`internal/command/credentials.go`), registered as Claude Code's `headersHelper`; it resolves profiles via the SDK (default) or `aws configure export-credentials`, and forwards a profile it cannot export as an `errors` entry instead of exiting non-zero. Things to keep:
+
+- **Handlers reach AWS through `Server.clientPool(ctx)`** (via `poolClients(ctx, …)` wherever possible), never `s.pool` — which is why every fetch path takes a `ctx`. `withPassthroughRequest` (the transport's `HTTPContextFunc`) parses the header into the context; a request without one gets `errNoPassthroughCredentials`, never a fallback identity.
+- **One `ProfilePool` per credential set**, keyed by a sha256 of the header in `PassthroughPools`. Forwarded sets are `profileEntry`s with `creds` set (built by `buildPassthrough` with static credentials and the shared config files switched off), and helper-reported failures are `pinnedErr` entries. So lazy STS, account scoping without AWS calls, `(account, region)` dedupe and "nobody authenticated is an error" all come from `ProfilePool` unchanged.
+- **Expiry is answered with HTTP 401, on `tools/call` only** (`refreshExpiredCredentials`). Claude Code re-runs the `headersHelper` on 401/403 and retries once, so expired role credentials refresh with nobody involved. It cannot loop: after the retry the set is either fresh or reported under `errors`, and neither gets a 401. Keep 401s off the handshake so clients do not start OAuth discovery.
+- **`AWS_PROFILE` is unset at startup** (`ClearServerProfile`): the SDK turns any value of it into a hard "profile must exist" requirement, and passthrough clients load with no config files, so it would fail every request. `TestPassthroughConfigIgnoresServerEnvironment` pins the isolation.
+- `aws_auth_status` reports the forwarded profiles (mechanism `passthrough`, expiry, errors); `aws_sso_login` refuses and points at the client-side login plus a reconnect.
 
 **Account scoping is a client-selection concern, not a filter.** `ClientPool` has
 `GetAccountClients(accountID, regions...)` alongside `GetClients(regions...)`, and
@@ -127,7 +137,7 @@ Cost Explorer is a billing API, not an inventory one, so it bypasses the resourc
 
 The API is **partition-global** (`savingsplans.amazonaws.com`): the client's region decides only which credentials sign. Everything else follows from that:
 
-- **`savingsPlansRepositories(accountID, cached)`** asks `poolClients` — not `s.pool` — for `DefaultAwsRegion` clients only, one per account. Going through `poolClients` is the rule from the account-scoping section above, and `TestSavingsPlansScopeByAccount` pins it. (The older `costRepositories` still filters after `GetClients`; new fetch paths do not.)
+- **`savingsPlansRepositories(ctx, accountID, cached)`** asks `poolClients` — not `s.pool` — for `DefaultAwsRegion` clients only, one per account. Going through `poolClients` is the rule from the account-scoping section above, and `TestSavingsPlansScopeByAccount` pins it. `costRepositories` now goes through it too.
 - **Inventory fans out, rates do not.** Plans differ per account so every account is queried and each row carries its `account_id`; rates are public prices identical whichever account asks, so exactly one repository is used — fanning out would return the same price list N times.
 - **Inventory is deliberately uncached** (`cached=false`). It answers "what are we committed to right now", and the 6h resource-cache window answers a different question. Rates are cached.
 - **`region` is a filter, never an endpoint.** For inventory it matches the plan's own `Region`, which only EC2 Instance plans carry — so a region filter excludes Compute plans, and that is correct, not a bug. For rates it goes into `OfferingRatesQuery.Region`.
@@ -189,6 +199,34 @@ Native `sso_session` profiles need no code beyond this — the SDK resolves and 
 
 `cache.go`: `NewCache` builds an awslib `DataCache` with a bigcache in-memory handler plus, when `--cache-dir` is set, a file handler (both share the TTL, default 6h). `--no-cache` makes `buildCache` return `nil`, and `NewServer`/`WithCache` both accept nil to run cache-free.
 
+### Agent usage guide (`skills/using-aws-mcp/SKILL.md`, `guide.go`)
+
+Tool descriptions are too short to carry how the tools fit together, and agents
+kept concluding that a type missing from `list_resource_types` was unsupported
+instead of reaching for `list_resources_fallback`. The guide fixes that at three
+points:
+
+- **`serverInstructions`** go out in the initialize response, and Claude Code
+  puts them in the system prompt. They cost context in *every* session, so they
+  hold only the rules an agent must never miss and point at the guide for
+  everything else. `TestServerInstructions` caps their length.
+- **`aws_usage_guide`** returns `skills/using-aws-mcp/SKILL.md`, embedded by the
+  top-level `skills` package (`go:embed` cannot reach above a package directory,
+  hence that package). The frontmatter is stripped; `topic` returns one `##`/`###`
+  section. Because the guide is embedded, it always matches the binary serving it.
+  The same file works unmodified as a Claude Code skill.
+- **`unsupportedTypeResult`** is the error `list_resources`/`count_resources`
+  give for an uncurated type, and it names the fallback. It used to point only at
+  `list_resource_types`, which by definition does not contain the type. That
+  error was where agents gave up.
+
+**Changing a tool means changing the guide in the same commit.** Two tests
+enforce it: `TestUsageGuideCoversEveryTool` fails when a registered tool is not
+mentioned in the guide, and `TestUsageGuideNamesOnlyRealTools` fails when the
+guide or the instructions name a `list_*`/`count_*`/`get_*`/`aws_*` tool that is
+not registered. Keep the guide generic: it ships to every user of the server, so
+organisation-specific tags, accounts or policies do not belong in it.
+
 ## Conventions
 
 - **Errors:** use this module's own `pkg/errors` (dependency-free, adds stack traces via `WithStack`/`Errorf`), not the stdlib `errors` or `pkg/errors` upstream.
@@ -198,6 +236,6 @@ Native `sso_session` profiles need no code beyond this — the SDK resolves and 
 
 ## Testing
 
-`internal/mcpserver/server_test.go` spins up the server behind an in-process streamable-HTTP test transport (`server.NewTestStreamableHTTPServer`) and drives it with a real `mcp-go` client. Tests that only exercise AWS-independent tools (`list_resource_types`, `list_regions`, `list_cost_dimensions`) pass a `nil` ClientPool — follow that pattern to test tool wiring without AWS credentials. Argument-rejection tests use the same nil pool as a tripwire: if validation ever moved after the pool access the test would panic instead of failing.
+`internal/mcpserver/server_test.go` spins up the server behind an in-process streamable-HTTP test transport (`servertest.NewTestStreamableHTTPServer`, in `mcp-go/server/servertest` since mcp-go v1.3) and drives it with a real `mcp-go` client. Tests that only exercise AWS-independent tools (`list_resource_types`, `list_regions`, `list_cost_dimensions`) pass a `nil` ClientPool — follow that pattern to test tool wiring without AWS credentials. Argument-rejection tests use the same nil pool as a tripwire: if validation ever moved after the pool access the test would panic instead of failing.
 
 `cost_test.go` covers the cost helpers against a fixed clock (`now`, a mid-month date) so relative periods do not drift with the calendar, and feeds synthetic `CostAndUsage` values through `buildCostResult` rather than mocking AWS.

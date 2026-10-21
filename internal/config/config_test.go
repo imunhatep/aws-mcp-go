@@ -26,6 +26,22 @@ func TestValidateAuthModesAreExclusive(t *testing.T) {
 			cfg:     Config{Addr: ":3040", Profiles: "dev", AssumeRoleArns: "arn:aws:iam::111111111111:role/r"},
 			wantErr: "--profiles cannot be combined",
 		},
+		{name: "passthrough only", cfg: Config{Addr: ":3040", CredentialsPassthrough: true}},
+		{
+			name:    "passthrough with profiles",
+			cfg:     Config{Addr: ":3040", CredentialsPassthrough: true, Profiles: "dev"},
+			wantErr: "--credentials-passthrough cannot be combined",
+		},
+		{
+			name:    "passthrough with assume role",
+			cfg:     Config{Addr: ":3040", CredentialsPassthrough: true, AssumeRole: true},
+			wantErr: "--credentials-passthrough cannot be combined",
+		},
+		{
+			name:    "passthrough with assume role arns",
+			cfg:     Config{Addr: ":3040", CredentialsPassthrough: true, AssumeRoleArns: "arn:aws:iam::111111111111:role/r"},
+			wantErr: "--credentials-passthrough cannot be combined",
+		},
 		{name: "missing addr", cfg: Config{}, wantErr: "--addr"},
 	}
 

@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strconv"
@@ -98,10 +99,10 @@ func (f typedFetch) warnings() []string {
 //
 // A non-empty accountID scopes the fan-out to that one account rather than
 // filtering its rows out afterwards — see poolClients.
-func (s *Server) fetchResources(rt awscfg.ResourceType, regions []ptypes.AwsRegion, accountID string) (typedFetch, error) {
+func (s *Server) fetchResources(ctx context.Context, rt awscfg.ResourceType, regions []ptypes.AwsRegion, accountID string) (typedFetch, error) {
 	out := typedFetch{scope: queryScope{Source: "awslib"}}
 
-	clients, err := s.poolClients(accountID, regions)
+	clients, err := s.poolClients(ctx, accountID, regions)
 	if err != nil {
 		return out, errors.WithStack(err)
 	}

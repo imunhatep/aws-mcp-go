@@ -35,6 +35,10 @@ type Config struct {
 	// SSOOpenBrowser additionally opens that URL locally. Best-effort and
 	// skipped in a container, where there is no browser to open.
 	SSOOpenBrowser bool
+	// CredentialsPassthrough makes the server hold no AWS credentials of its
+	// own: every request must forward them in the X-Aws-Credentials header,
+	// and one without them is refused.
+	CredentialsPassthrough bool
 }
 
 // FromCommand builds a Config from the serve command's flags.
@@ -49,6 +53,8 @@ func FromCommand(cmd *cli.Command) *Config {
 		Profiles:       cmd.String("profiles"),
 		SSOAutoLogin:   cmd.Bool("sso-auto-login"),
 		SSOOpenBrowser: cmd.Bool("sso-open-browser"),
+
+		CredentialsPassthrough: cmd.Bool("credentials-passthrough"),
 	}
 }
 
@@ -58,10 +64,17 @@ func (c *Config) Validate() error {
 		return errors.New("--addr (MCP_ADDR) is required")
 	}
 
-	// The three authentication modes are exclusive: local (no flags),
-	// multi-profile (--profiles) and cross-account (--assume-role*).
+	// The four authentication modes are exclusive: local (no flags),
+	// multi-profile (--profiles), cross-account (--assume-role*) and
+	// passthrough (--credentials-passthrough).
 	if c.Profiles != "" && (c.AssumeRole || c.AssumeRoleArns != "") {
 		return errors.New("--profiles cannot be combined with --assume-role or --assume-role-arns; pick one authentication mode")
+	}
+
+	// Passthrough uses the client's credentials and nothing else, so a server
+	// profile or role alongside it could only ever be silently ignored.
+	if c.CredentialsPassthrough && (c.Profiles != "" || c.AssumeRole || c.AssumeRoleArns != "") {
+		return errors.New("--credentials-passthrough cannot be combined with --profiles, --assume-role or --assume-role-arns: in passthrough mode the server uses only the credentials each request forwards")
 	}
 
 	return nil

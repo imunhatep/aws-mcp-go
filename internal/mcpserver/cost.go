@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -57,10 +58,13 @@ type accountCostRepository struct {
 // Cost Explorer is a global service served from us-east-1, so clients are
 // requested for that region only — the region of the client has no bearing on
 // the data returned, only on which credentials sign the request.
-func (s *Server) costRepositories(accountID string) ([]accountCostRepository, error) {
+//
+// Scoping goes through poolClients, so an account_id never builds clients for
+// the other accounts in the pool; the id check in the loop is only a guard.
+func (s *Server) costRepositories(ctx context.Context, accountID string) ([]accountCostRepository, error) {
 	accountID = strings.TrimSpace(accountID)
 
-	clients, err := s.pool.GetClients(ptypes.DefaultAwsRegion)
+	clients, err := s.poolClients(ctx, accountID, []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}

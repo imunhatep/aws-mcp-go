@@ -51,12 +51,39 @@ type ClientPool interface {
 // every other account in the pool, and merely hidden their rows. For a server
 // whose pool spans both a development and a production account, that difference
 // is the whole point of the argument.
-func (s *Server) poolClients(accountID string, regions []ptypes.AwsRegion) ([]*v3.Client, error) {
-	if accountID == "" {
-		return s.pool.GetClients(regions...)
+func (s *Server) poolClients(ctx context.Context, accountID string, regions []ptypes.AwsRegion) ([]*v3.Client, error) {
+	pool, err := s.clientPool(ctx)
+	if err != nil {
+		return nil, err
 	}
 
-	return s.pool.GetAccountClients(ptypes.AwsAccountID(accountID), regions...)
+	if accountID == "" {
+		return pool.GetClients(regions...)
+	}
+
+	return pool.GetAccountClients(ptypes.AwsAccountID(accountID), regions...)
+}
+
+// clientPool returns the pool a request runs against: the server's own, or — in
+// credential-passthrough mode — the one built from the credentials that request
+// carried. Every handler must reach AWS through this (via poolClients where it
+// can), since in passthrough mode s.pool is nil and the caller's identity lives
+// only in the request context.
+func (s *Server) clientPool(ctx context.Context) (ClientPool, error) {
+	if s.passthrough == nil {
+		return s.pool, nil
+	}
+
+	req, ok := passthroughFromContext(ctx)
+	if !ok || !req.present {
+		return nil, errNoPassthroughCredentials
+	}
+
+	if req.err != nil {
+		return nil, req.err
+	}
+
+	return s.passthrough.Pool(req.key, req.creds), nil
 }
 
 // Server wires the AWS client pool and resource cache into an MCP server that
@@ -73,6 +100,19 @@ type Server struct {
 	// state, they just cannot start a login.
 	login    *SSOLoginManager
 	profiles []string
+
+	// passthrough is set in credential-passthrough mode, where every request
+	// brings its own AWS credentials and pool is nil. See passthrough.go.
+	passthrough *PassthroughPools
+}
+
+// WithPassthrough switches the server to credential-passthrough mode: AWS is
+// called with the credentials each request carries in CredentialsHeader, and a
+// request without them is refused instead of falling back to anything local.
+func (s *Server) WithPassthrough(pools *PassthroughPools) *Server {
+	s.passthrough = pools
+
+	return s
 }
 
 // WithAuth attaches the SSO login manager and the configured profile names, which
@@ -101,6 +141,7 @@ func NewServer(ctx context.Context, pool ClientPool, dc *cache.DataCache) *Serve
 		server.WithToolCapabilities(true),
 		server.WithRecovery(),
 		server.WithLogging(),
+		server.WithInstructions(serverInstructions),
 	)
 
 	s.registerTools()
@@ -128,30 +169,62 @@ func (s *Server) MCPServer() *server.MCPServer {
 // http://<addr>/mcp using the streamable-HTTP transport.
 const mcpEndpointPath = "/mcp"
 
+// httpHandler builds the handler mounted at mcpEndpointPath, and returns the
+// underlying transport so its sessions can be shut down. In passthrough mode the
+// request's credentials are parsed into the context the tool handlers see, and
+// expired ones are answered with a 401 so the MCP client refreshes them.
+func (s *Server) httpHandler() (http.Handler, *server.StreamableHTTPServer) {
+	opts := []server.StreamableHTTPOption{
+		server.WithEndpointPath(mcpEndpointPath),
+		server.WithHeartbeatInterval(30 * time.Second),
+	}
+
+	if s.passthrough != nil {
+		opts = append(opts, server.WithHTTPContextFunc(withPassthroughRequest))
+	}
+
+	transport := server.NewStreamableHTTPServer(s.mcp, opts...)
+
+	if s.passthrough != nil {
+		return refreshExpiredCredentials(transport), transport
+	}
+
+	return transport, transport
+}
+
 // ServeHTTP starts the MCP server over the streamable-HTTP transport, blocking
 // until ctx is cancelled or the server fails. addr is the listen address
 // (e.g. ":3040"); the MCP endpoint is exposed at the "/mcp" path. When ctx is
 // cancelled the server is shut down gracefully.
 func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
-	httpSrv := server.NewStreamableHTTPServer(
-		s.mcp,
-		server.WithEndpointPath(mcpEndpointPath),
-		server.WithHeartbeatInterval(30*time.Second),
-	)
+	handler, mcpHandler := s.httpHandler()
+
+	// Routing is done here rather than by the transport's own Start, because in
+	// passthrough mode the handler is wrapped before it is mounted.
+	mux := http.NewServeMux()
+	mux.Handle(mcpEndpointPath, handler)
+
+	httpSrv := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 30 * time.Second}
 
 	log.Info().
 		Str("addr", addr).
 		Str("endpoint", mcpEndpointPath).
+		Bool("credentials_passthrough", s.passthrough != nil).
 		Msg("[mcpserver.ServeHTTP] starting MCP streamable-HTTP server")
 
 	errCh := make(chan error, 1)
-	go func() { errCh <- httpSrv.Start(addr) }()
+	go func() { errCh <- httpSrv.ListenAndServe() }()
 
 	select {
 	case <-ctx.Done():
 		log.Info().Msg("[mcpserver.ServeHTTP] shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
+		// The transport owns the MCP sessions and the http.Server owns the
+		// listener; both have to be told.
+		if err := mcpHandler.Shutdown(shutdownCtx); err != nil {
+			log.Warn().Err(err).Msg("[mcpserver.ServeHTTP] closing mcp sessions failed")
+		}
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			return errors.WithStack(err)
 		}

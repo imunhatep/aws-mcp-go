@@ -46,12 +46,12 @@ func writeTokenCache(t *testing.T, session string, expiresAt time.Time) string {
 
 func TestInspectProfile(t *testing.T) {
 	writeSharedConfig(t, `
-[sso-session evo]
+[sso-session corp]
 sso_start_url = https://example.awsapps.com/start
 sso_region = eu-central-1
 
 [profile modern]
-sso_session = evo
+sso_session = corp
 sso_account_id = 111111111111
 sso_role_name = readonly
 region = eu-central-1
@@ -77,9 +77,9 @@ region = eu-west-1
 
 		assert.True(t, auth.IsSSO())
 		assert.False(t, auth.IsLegacySSO())
-		assert.Equal(t, "evo", auth.SSOSession)
+		assert.Equal(t, "corp", auth.SSOSession)
 		assert.Equal(t, "111111111111", auth.SSOAccountID)
-		assert.Equal(t, "aws sso login --sso-session evo", auth.LoginHint())
+		assert.Equal(t, "aws sso login --sso-session corp", auth.LoginHint())
 	})
 
 	t.Run("legacy sso", func(t *testing.T) {
@@ -125,9 +125,9 @@ func TestCheckSSOToken(t *testing.T) {
 
 	t.Run("valid token", func(t *testing.T) {
 		expiry := time.Now().Add(4 * time.Hour)
-		writeTokenCache(t, "evo", expiry)
+		writeTokenCache(t, "corp", expiry)
 
-		status, err := CheckSSOToken(ProfileAuth{SSOSession: "evo"})
+		status, err := CheckSSOToken(ProfileAuth{SSOSession: "corp"})
 		require.NoError(t, err)
 
 		assert.True(t, status.Found)
@@ -137,9 +137,9 @@ func TestCheckSSOToken(t *testing.T) {
 	})
 
 	t.Run("expired token", func(t *testing.T) {
-		writeTokenCache(t, "evo", time.Now().Add(-time.Hour))
+		writeTokenCache(t, "corp", time.Now().Add(-time.Hour))
 
-		status, err := CheckSSOToken(ProfileAuth{SSOSession: "evo"})
+		status, err := CheckSSOToken(ProfileAuth{SSOSession: "corp"})
 		require.NoError(t, err)
 
 		assert.True(t, status.Found)
@@ -147,11 +147,11 @@ func TestCheckSSOToken(t *testing.T) {
 	})
 
 	t.Run("read-only cache dir", func(t *testing.T) {
-		dir := writeTokenCache(t, "evo", time.Now().Add(4*time.Hour))
+		dir := writeTokenCache(t, "corp", time.Now().Add(4*time.Hour))
 		require.NoError(t, os.Chmod(dir, 0o500))
 		t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
-		status, err := CheckSSOToken(ProfileAuth{SSOSession: "evo"})
+		status, err := CheckSSOToken(ProfileAuth{SSOSession: "corp"})
 		require.NoError(t, err)
 
 		// The SDK writes a temp file into this directory and renames it, so a
@@ -163,7 +163,7 @@ func TestCheckSSOToken(t *testing.T) {
 	t.Run("no login yet", func(t *testing.T) {
 		t.Setenv("HOME", t.TempDir())
 
-		status, err := CheckSSOToken(ProfileAuth{SSOSession: "evo"})
+		status, err := CheckSSOToken(ProfileAuth{SSOSession: "corp"})
 		require.NoError(t, err)
 
 		assert.False(t, status.Found)
@@ -173,22 +173,22 @@ func TestCheckSSOToken(t *testing.T) {
 
 func TestPreflightProfileFailsOnExpiredSSO(t *testing.T) {
 	writeSharedConfig(t, `
-[sso-session evo]
+[sso-session corp]
 sso_start_url = https://example.awsapps.com/start
 sso_region = eu-central-1
 
 [profile dev]
-sso_session = evo
+sso_session = corp
 sso_account_id = 111111111111
 sso_role_name = readonly
 `)
-	writeTokenCache(t, "evo", time.Now().Add(-time.Hour))
+	writeTokenCache(t, "corp", time.Now().Add(-time.Hour))
 
 	_, err := PreflightProfile(context.Background(), "dev")
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "expired SSO token")
-	assert.Contains(t, err.Error(), "aws sso login --sso-session evo")
+	assert.Contains(t, err.Error(), "aws sso login --sso-session corp")
 }
 
 func TestPreflightProfileUndefinedProfile(t *testing.T) {
@@ -201,7 +201,7 @@ func TestPreflightProfileUndefinedProfile(t *testing.T) {
 }
 
 func TestExplainCredentialError(t *testing.T) {
-	sso := ProfileAuth{Name: "dev", SSOSession: "evo"}
+	sso := ProfileAuth{Name: "dev", SSOSession: "corp"}
 
 	tests := []struct {
 		name string
@@ -213,7 +213,7 @@ func TestExplainCredentialError(t *testing.T) {
 			name: "expired sso token",
 			auth: sso,
 			err:  errors.New("refresh cached SSO token failed, cached SSO token is expired, or not present, and cannot be refreshed"),
-			want: []string{`"dev"`, "aws sso login --sso-session evo"},
+			want: []string{`"dev"`, "aws sso login --sso-session corp"},
 		},
 		{
 			name: "missing profile",
@@ -260,20 +260,20 @@ func TestExplainCredentialError(t *testing.T) {
 
 func TestPreflightProfileRejectsMalformedTokenCache(t *testing.T) {
 	writeSharedConfig(t, `
-[sso-session evo]
+[sso-session corp]
 sso_start_url = https://example.awsapps.com/start
 sso_region = eu-central-1
 
 [profile dev]
-sso_session = evo
+sso_session = corp
 sso_account_id = 111111111111
 sso_role_name = readonly
 `)
 
 	// A token file the SDK cannot read an expiry out of: without this check the
 	// server starts and fails later with an opaque RFC3339 parse error.
-	dir := writeTokenCache(t, "evo", time.Now().Add(time.Hour))
-	status, err := CheckSSOToken(ProfileAuth{SSOSession: "evo"})
+	dir := writeTokenCache(t, "corp", time.Now().Add(time.Hour))
+	status, err := CheckSSOToken(ProfileAuth{SSOSession: "corp"})
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(status.Path, []byte(`{"accessToken":"x"}`), 0o600))
 	require.DirExists(t, dir)
@@ -282,7 +282,7 @@ sso_role_name = readonly
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "malformed SSO token cache")
-	assert.Contains(t, err.Error(), "aws sso login --sso-session evo")
+	assert.Contains(t, err.Error(), "aws sso login --sso-session corp")
 }
 
 // writeTokenCacheDoc writes an arbitrary token cache document for the session,
@@ -307,16 +307,16 @@ func writeTokenCacheDoc(t *testing.T, session string, doc map[string]any) string
 // needed, and taking the server down to ask for it.
 func TestPreflightAcceptsExpiredButRefreshableToken(t *testing.T) {
 	writeSharedConfig(t, `
-[sso-session evo]
+[sso-session corp]
 sso_start_url = https://example.awsapps.com/start
 sso_region = eu-central-1
 
 [profile dev]
-sso_session = evo
+sso_session = corp
 sso_account_id = 111111111111
 sso_role_name = readonly
 `)
-	writeTokenCacheDoc(t, "evo", map[string]any{
+	writeTokenCacheDoc(t, "corp", map[string]any{
 		"accessToken":  "stale",
 		"expiresAt":    time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
 		"refreshToken": "refresh",
@@ -357,7 +357,7 @@ func TestCheckSSOTokenReportsWritabilityBeforeFirstLogin(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	status, err := CheckSSOToken(ProfileAuth{SSOSession: "evo", SSOStartURL: "https://example.awsapps.com/start"})
+	status, err := CheckSSOToken(ProfileAuth{SSOSession: "corp", SSOStartURL: "https://example.awsapps.com/start"})
 	require.NoError(t, err)
 
 	assert.False(t, status.Found)
@@ -366,7 +366,7 @@ func TestCheckSSOTokenReportsWritabilityBeforeFirstLogin(t *testing.T) {
 	require.NoError(t, os.Chmod(home, 0o500))
 	t.Cleanup(func() { _ = os.Chmod(home, 0o700) })
 
-	status, err = CheckSSOToken(ProfileAuth{SSOSession: "evo", SSOStartURL: "https://example.awsapps.com/start"})
+	status, err = CheckSSOToken(ProfileAuth{SSOSession: "corp", SSOStartURL: "https://example.awsapps.com/start"})
 	require.NoError(t, err)
 
 	assert.False(t, status.CacheWritable, "a read-only home cannot hold a new token cache")

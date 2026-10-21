@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"sort"
+	"strings"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/rs/zerolog/log"
@@ -142,6 +143,7 @@ func (s *Server) registerTools() {
 	s.registerCostTools()
 	s.registerAuthTools()
 	s.registerSavingsPlansTools()
+	s.registerGuideTools()
 }
 
 func (s *Server) handleListResourceTypes(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -165,14 +167,19 @@ func (s *Server) handleListRegions(_ context.Context, _ mcp.CallToolRequest) (*m
 	return jsonResult(infos)
 }
 
-func (s *Server) handleListAccounts(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleListAccounts(ctx context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	// Ensure the pool has resolved at least the default client so local-mode
 	// pools (which populate account IDs lazily) report a non-empty result.
-	if _, err := s.pool.GetClients(ptypes.DefaultAwsRegion); err != nil {
+	pool, err := s.clientPool(ctx)
+	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to initialise aws client", err), nil
 	}
 
-	ids, err := s.pool.ListAccountIDs()
+	if _, err := pool.GetClients(ptypes.DefaultAwsRegion); err != nil {
+		return mcp.NewToolResultErrorFromErr("failed to initialise aws client", err), nil
+	}
+
+	ids, err := pool.ListAccountIDs()
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to list account ids", err), nil
 	}
@@ -186,10 +193,10 @@ func (s *Server) handleListAccounts(_ context.Context, _ mcp.CallToolRequest) (*
 	return jsonResult(accounts)
 }
 
-func (s *Server) handleListResources(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleListResources(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	rt, ok := ResolveResourceType(req.GetString("resource_type", ""))
 	if !ok {
-		return mcp.NewToolResultErrorf("unknown or unsupported resource type %q; call list_resource_types for valid values", req.GetString("resource_type", "")), nil
+		return unsupportedTypeResult(req.GetString("resource_type", "")), nil
 	}
 
 	view, ok := parseView(req.GetString("view", ""))
@@ -225,9 +232,9 @@ func (s *Server) handleListResources(_ context.Context, req mcp.CallToolRequest)
 		Msg("[mcpserver.handleListResources] listing resources")
 
 	// After argument validation, so a bad argument still costs no AWS call.
-	regions, regionWarnings := s.narrowRegions(regions, regionArg, req.GetString("account_id", ""))
+	regions, regionWarnings := s.narrowRegions(ctx, regions, regionArg, req.GetString("account_id", ""))
 
-	fetched, err := s.fetchResources(rt, regions, req.GetString("account_id", ""))
+	fetched, err := s.fetchResources(ctx, rt, regions, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to list resources", err), nil
 	}
@@ -248,10 +255,10 @@ func (s *Server) handleListResources(_ context.Context, req mcp.CallToolRequest)
 	return jsonResult(result)
 }
 
-func (s *Server) handleCountResources(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleCountResources(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	rt, ok := ResolveResourceType(req.GetString("resource_type", ""))
 	if !ok {
-		return mcp.NewToolResultErrorf("unknown or unsupported resource type %q; call list_resource_types for valid values", req.GetString("resource_type", "")), nil
+		return unsupportedTypeResult(req.GetString("resource_type", "")), nil
 	}
 
 	dims, err := parseGroupBy(req.GetString("group_by", ""))
@@ -278,9 +285,9 @@ func (s *Server) handleCountResources(_ context.Context, req mcp.CallToolRequest
 		Msg("[mcpserver.handleCountResources] counting resources")
 
 	// After argument validation, so a bad argument still costs no AWS call.
-	regions, regionWarnings := s.narrowRegions(regions, regionArg, req.GetString("account_id", ""))
+	regions, regionWarnings := s.narrowRegions(ctx, regions, regionArg, req.GetString("account_id", ""))
 
-	fetched, err := s.fetchResources(rt, regions, req.GetString("account_id", ""))
+	fetched, err := s.fetchResources(ctx, rt, regions, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to count resources", err), nil
 	}
@@ -300,4 +307,17 @@ func jsonResult(v any) (*mcp.CallToolResult, error) {
 	}
 
 	return mcp.NewToolResultText(string(b)), nil
+}
+
+// unsupportedTypeResult answers a resource_type that is not in the curated
+// allowlist. It names list_resources_fallback rather than only pointing back at
+// list_resource_types: that list cannot contain the type, so an agent sent there
+// concludes the type is unsupported — which is exactly how the fallback kept
+// being overlooked.
+func unsupportedTypeResult(resourceType string) *mcp.CallToolResult {
+	if strings.TrimSpace(resourceType) == "" {
+		return mcp.NewToolResultError("resource_type is required; call list_resource_types for the curated types, or use list_resources_fallback for any other AWS::Service::Resource type")
+	}
+
+	return mcp.NewToolResultErrorf("%q is not one of the curated types list_resources and count_resources serve. List it with list_resources_fallback instead (resource_type=%q, in CloudFormation form such as AWS::EC2::NatGateway; its total answers 'how many'). Call list_resource_types for the curated types.", resourceType, resourceType)
 }

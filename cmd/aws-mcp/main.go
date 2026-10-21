@@ -16,6 +16,7 @@ func main() {
 	app.Commands = []*cli.Command{
 		command.ServeCommand{}.Command(),
 		command.VersionCommand{}.Command(),
+		command.CredentialsHeadersCommand{}.Command(),
 	}
 
 	if err := app.Run(context.Background(), os.Args); err != nil {

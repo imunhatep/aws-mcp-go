@@ -87,6 +87,7 @@ type fallbackResult struct {
 // the same interface as the typed one — so the parallel fan-out, the cache and
 // the global-type collapsing all behave exactly as they do for list_resources.
 func (s *Server) fetchFallbackResources(
+	ctx context.Context,
 	rt awscfg.ResourceType,
 	regions []ptypes.AwsRegion,
 	detailed bool,
@@ -98,7 +99,7 @@ func (s *Server) fetchFallbackResources(
 	// Control calls are only issued against that account. This matters more here
 	// than on the typed path, since view=detail costs one GetResource per
 	// resource in every account reached.
-	clients, err := s.poolClients(accountID, regions)
+	clients, err := s.poolClients(ctx, accountID, regions)
 	if err != nil {
 		return out, errors.WithStack(err)
 	}
@@ -160,7 +161,7 @@ func dedupeFallback(items []service.ResourceInterface) ([]service.ResourceInterf
 	return out, len(items) - len(out)
 }
 
-func (s *Server) handleListResourcesFallback(_ context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+func (s *Server) handleListResourcesFallback(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	rawType := req.GetString("resource_type", "")
 
 	rt, err := ResolveFallbackResourceType(rawType)
@@ -209,9 +210,9 @@ func (s *Server) handleListResourcesFallback(_ context.Context, req mcp.CallTool
 	// matters most here: the fallback is the tool a caller reaches for when a
 	// type has no dedicated implementation, so it is the one that ends up
 	// sweeping every region.
-	regions, regionWarnings := s.narrowRegions(regions, regionArg, req.GetString("account_id", ""))
+	regions, regionWarnings := s.narrowRegions(ctx, regions, regionArg, req.GetString("account_id", ""))
 
-	fetched, err := s.fetchFallbackResources(rt, regions, detailed, req.GetString("account_id", ""))
+	fetched, err := s.fetchFallbackResources(ctx, rt, regions, detailed, req.GetString("account_id", ""))
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("failed to list resources", err), nil
 	}

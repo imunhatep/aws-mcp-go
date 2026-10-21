@@ -44,13 +44,13 @@ sso_registration_scopes = sso:account:access
 [profile dev]
 sso_session = my-session
 sso_account_id = 111111111111
-sso_role_name = prodops-readonly
+sso_role_name = readonly
 region = eu-central-1
 
 [profile prod]
 sso_session = my-session
 sso_account_id = 222222222222
-sso_role_name = prodops-readonly
+sso_role_name = readonly
 region = eu-central-1
 ```
 

@@ -384,7 +384,7 @@ func TestSavingsPlansScopeByAccount(t *testing.T) {
 
 		// No clients come back from the spy, so this ends in "no accounts are
 		// reachable" — the assertion is about which pool method was reached.
-		_, err := srv.savingsPlansRepositories("111111111111", false)
+		_, err := srv.savingsPlansRepositories(context.Background(), "111111111111", false)
 		require.Error(t, err)
 
 		assert.Equal(t, 1, spy.accountCalls)
@@ -396,7 +396,7 @@ func TestSavingsPlansScopeByAccount(t *testing.T) {
 		spy := &scopeSpyPool{}
 		srv := &Server{ctx: context.Background(), pool: spy}
 
-		_, err := srv.savingsPlansRepositories("", false)
+		_, err := srv.savingsPlansRepositories(context.Background(), "", false)
 		require.Error(t, err)
 
 		assert.Equal(t, 1, spy.allCalls)

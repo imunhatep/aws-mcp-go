@@ -45,6 +45,15 @@ type profileEntry struct {
 	pool      regionClientPool
 	err       error
 	nextRetry time.Time
+
+	// creds is set for an entry serving credentials forwarded by the MCP
+	// client (passthrough mode) rather than a local shared-config profile.
+	creds *PassthroughProfile
+	// pinnedErr marks a profile the client reported it could not export: its
+	// err is final, since nothing on the server can resolve it.
+	pinnedErr bool
+	// loginHint is the client-side renewal command for a pinned entry.
+	loginHint string
 }
 
 // knownAccountID returns the account this profile serves when that is already
@@ -138,6 +147,16 @@ func (p *ProfilePool) resolve(entry *profileEntry) error {
 	entry.mu.Lock()
 	defer entry.mu.Unlock()
 
+	if entry.pinnedErr {
+		return entry.err
+	}
+
+	// Forwarded credentials carry their expiry, so a lapsed set is refused here
+	// — even with a pool already built — rather than by AWS one call at a time.
+	if entry.creds != nil && entry.creds.expiresWithin(time.Now(), 0) {
+		return passthroughExpiredError(entry.creds)
+	}
+
 	if entry.pool != nil {
 		return nil
 	}
@@ -146,7 +165,7 @@ func (p *ProfilePool) resolve(entry *profileEntry) error {
 		return entry.err
 	}
 
-	pool, auth, accountID, err := p.build(entry.name)
+	pool, auth, accountID, err := p.build(entry)
 	if err != nil {
 		entry.err = err
 		entry.nextRetry = time.Now().Add(profileRetryInterval)
@@ -169,7 +188,13 @@ func (p *ProfilePool) resolve(entry *profileEntry) error {
 }
 
 // build resolves one profile's credentials and returns its pool and identity.
-func (p *ProfilePool) build(name string) (regionClientPool, ProfileAuth, ptypes.AwsAccountID, error) {
+func (p *ProfilePool) build(entry *profileEntry) (regionClientPool, ProfileAuth, ptypes.AwsAccountID, error) {
+	if entry.creds != nil {
+		return p.buildPassthrough(entry)
+	}
+
+	name := entry.name
+
 	// Parse the profile's config first: this catches an undefined profile, a
 	// missing or unrefreshable SSO login and a read-only token cache with an
 	// actionable message, instead of an opaque SDK error on the STS call below.
@@ -298,7 +323,12 @@ func (p *ProfilePool) GetClients(regions ...ptypes.AwsRegion) ([]*v3.Client, err
 func (p *ProfilePool) explain(entry *profileEntry, err error) error {
 	entry.mu.Lock()
 	auth := entry.auth
+	forwarded := entry.creds
 	entry.mu.Unlock()
+
+	if forwarded != nil {
+		return explainPassthrough(forwarded, err)
+	}
 
 	return p.login.Explain(auth, err)
 }
@@ -429,12 +459,26 @@ func (p *ProfilePool) Profiles() []ProfileState {
 
 	for _, entry := range p.entries {
 		entry.mu.Lock()
-		states = append(states, ProfileState{
+		state := ProfileState{
 			Auth:          entry.auth,
 			AccountID:     entry.accountID.String(),
 			Authenticated: entry.pool != nil,
 			Err:           entry.err,
-		})
+			Passthrough:   entry.creds != nil || entry.pinnedErr,
+			LoginHint:     entry.loginHint,
+		}
+
+		if entry.creds != nil {
+			state.Expires = entry.creds.Expiration
+			state.LoginHint = entry.creds.loginHint()
+
+			if entry.creds.expiresWithin(time.Now(), 0) {
+				state.Authenticated = false
+				state.Err = passthroughExpiredError(entry.creds)
+			}
+		}
+
+		states = append(states, state)
 		entry.mu.Unlock()
 	}
 
@@ -447,4 +491,11 @@ type ProfileState struct {
 	AccountID     string
 	Authenticated bool
 	Err           error
+
+	// Passthrough marks credentials forwarded by the MCP client; Expires is
+	// their expiry (zero when unknown or long-lived) and LoginHint the command
+	// that renews them on the client machine.
+	Passthrough bool
+	Expires     time.Time
+	LoginHint   string
 }

@@ -2,6 +2,7 @@ package command
 
 import (
 	"context"
+	"net"
 	"os"
 	"os/signal"
 	"strings"
@@ -79,6 +80,11 @@ func (c ServeCommand) Command() *cli.Command {
 				Usage:   "comma-separated AWS shared-config profile names to serve (e.g. dev,prod); each profile becomes one account in the pool. Cannot be combined with the assume-role flags",
 				Sources: cli.EnvVars("MCP_AWS_PROFILES"),
 			},
+			&cli.BoolFlag{
+				Name:    "credentials-passthrough",
+				Usage:   "hold no AWS credentials on the server: every request must forward them in the " + mcpserver.CredentialsHeader + " header (produced client-side by 'aws-mcp credentials-headers', registered as the MCP headersHelper). Cannot be combined with --profiles or the assume-role flags",
+				Sources: cli.EnvVars("MCP_CREDENTIALS_PASSTHROUGH"),
+			},
 		},
 		Action: c.run,
 	}
@@ -93,14 +99,18 @@ func (c ServeCommand) run(ctx context.Context, cmd *cli.Command) error {
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	login := mcpserver.NewSSOLoginManager(ctx, cfg.SSOAutoLogin, cfg.SSOOpenBrowser)
-
-	pool, err := buildClientPool(ctx, cfg, login)
+	dc, err := buildCache(ctx, cfg)
 	if err != nil {
 		return err
 	}
 
-	dc, err := buildCache(ctx, cfg)
+	if cfg.CredentialsPassthrough {
+		return servePassthrough(ctx, cfg, dc)
+	}
+
+	login := mcpserver.NewSSOLoginManager(ctx, cfg.SSOAutoLogin, cfg.SSOOpenBrowser)
+
+	pool, err := buildClientPool(ctx, cfg, login)
 	if err != nil {
 		return err
 	}
@@ -119,6 +129,48 @@ func (c ServeCommand) run(ctx context.Context, cmd *cli.Command) error {
 	go warmPool(pool)
 
 	return srv.ServeHTTP(ctx, cfg.Addr)
+}
+
+// servePassthrough runs the server with no credentials of its own: each request
+// is served with the AWS credentials it forwards. There is no pool to warm and
+// no login to manage — both live on the client machine.
+func servePassthrough(ctx context.Context, cfg *config.Config, dc *cache.DataCache) error {
+	log.Info().Str("header", mcpserver.CredentialsHeader).Msg("[serve] credential passthrough: using only the AWS credentials each request forwards")
+
+	if profile := mcpserver.ClearServerProfile(); profile != "" {
+		log.Warn().Str("aws_profile", profile).Msg("[serve] credential passthrough: ignoring AWS_PROFILE; the server uses only forwarded credentials")
+	}
+
+	if bindsAllInterfaces(cfg.Addr) {
+		log.Warn().Str("addr", cfg.Addr).Msg("[serve] credential passthrough over plain HTTP on every interface: forwarded AWS credentials cross the network in cleartext; bind to 127.0.0.1 or put a TLS-terminating proxy in front")
+	}
+
+	if dc != nil {
+		log.Info().Msg("[serve] the resource cache is keyed by account, not by caller: callers forwarding different roles in the same account share cached listings; use --no-cache if that matters")
+	}
+
+	srv := mcpserver.NewServer(ctx, nil, dc).
+		WithRegionTTL(failureTTL(cfg)).
+		WithPassthrough(mcpserver.NewPassthroughPools(ctx).WithFailureTTL(failureTTL(cfg)))
+
+	return srv.ServeHTTP(ctx, cfg.Addr)
+}
+
+// bindsAllInterfaces reports whether a listen address accepts connections from
+// beyond the local machine.
+func bindsAllInterfaces(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true
+	}
+
+	if host == "localhost" {
+		return false
+	}
+
+	ip := net.ParseIP(host)
+
+	return ip == nil || !ip.IsLoopback()
 }
 
 // warmPool exercises the credentials once at startup so the log shows the active

@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -42,7 +43,7 @@ func TestPoolClientsScopesWhenAccountGiven(t *testing.T) {
 	spy := &scopeSpyPool{}
 	srv := &Server{pool: spy}
 
-	_, err := srv.poolClients("111111111111", []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
+	_, err := srv.poolClients(context.Background(), "111111111111", []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, spy.accountCalls, "an account_id must go through the scoped path")
@@ -54,7 +55,7 @@ func TestPoolClientsFansOutWhenNoAccountGiven(t *testing.T) {
 	spy := &scopeSpyPool{}
 	srv := &Server{pool: spy}
 
-	_, err := srv.poolClients("", []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
+	_, err := srv.poolClients(context.Background(), "", []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, spy.allCalls)
@@ -67,7 +68,7 @@ func TestPoolClientsPropagatesUnreachableAccount(t *testing.T) {
 	spy := &scopeSpyPool{err: errors.New("account 999999999999 is not reachable by any configured profile")}
 	srv := &Server{pool: spy}
 
-	_, err := srv.poolClients("999999999999", []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
+	_, err := srv.poolClients(context.Background(), "999999999999", []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not reachable")
@@ -83,7 +84,7 @@ func TestFetchPathsScopeByAccount(t *testing.T) {
 		spy := &scopeSpyPool{}
 		srv := &Server{pool: spy}
 
-		_, err := srv.fetchResources("AWS::EC2::Instance", regions, "111111111111")
+		_, err := srv.fetchResources(context.Background(), "AWS::EC2::Instance", regions, "111111111111")
 		require.NoError(t, err)
 
 		assert.Equal(t, 1, spy.accountCalls)
@@ -94,7 +95,7 @@ func TestFetchPathsScopeByAccount(t *testing.T) {
 		spy := &scopeSpyPool{}
 		srv := &Server{pool: spy}
 
-		fetched, err := srv.fetchFallbackResources("AWS::Kinesis::Stream", regions, false, "111111111111")
+		fetched, err := srv.fetchFallbackResources(context.Background(), "AWS::Kinesis::Stream", regions, false, "111111111111")
 		require.NoError(t, err)
 
 		assert.Equal(t, 1, spy.accountCalls)

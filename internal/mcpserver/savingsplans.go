@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"context"
 	"sort"
 	"strconv"
 	"strings"
@@ -72,10 +73,10 @@ type accountSavingsPlansRepository struct {
 // cached selects the caching wrapper. Rates are published prices and cache well;
 // inventory answers "what do we own right now", where a stale answer misleads
 // rather than merely lags — see the call sites.
-func (s *Server) savingsPlansRepositories(accountID string, cached bool) ([]accountSavingsPlansRepository, error) {
+func (s *Server) savingsPlansRepositories(ctx context.Context, accountID string, cached bool) ([]accountSavingsPlansRepository, error) {
 	accountID = strings.TrimSpace(accountID)
 
-	clients, err := s.poolClients(accountID, []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
+	clients, err := s.poolClients(ctx, accountID, []ptypes.AwsRegion{ptypes.DefaultAwsRegion})
 	if err != nil {
 		return nil, errors.WithStack(err)
 	}
