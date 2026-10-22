@@ -14,7 +14,7 @@ import (
 
 // registerTools declares every MCP tool the server exposes.
 func (s *Server) registerTools() {
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_resource_types",
 			mcp.WithDescription("List the AWS resource types this server can enumerate. Returns each type in both canonical (AWS::EC2::Instance) and URL (aws_ec2_instance) form, and whether it is a global (non-regional) resource. Use one of these values as the resource_type argument to list_resources."),
@@ -22,7 +22,7 @@ func (s *Server) registerTools() {
 		s.handleListResourceTypes,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_regions",
 			mcp.WithDescription("List the AWS regions known to this server, with human-readable descriptions. Any region name may be passed as the optional region argument to list_resources."),
@@ -30,7 +30,7 @@ func (s *Server) registerTools() {
 		s.handleListRegions,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_accounts",
 			mcp.WithDescription("List the AWS account IDs this server can reach. In local mode this is the single account of the active AWS credentials/SSO profile; in assume-role mode it is every account whose role can be assumed."),
@@ -38,7 +38,7 @@ func (s *Server) registerTools() {
 		s.handleListAccounts,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_resources",
 			mcp.WithDescription("List AWS resources of a given type across accounts and regions. Results are cached (default 6h) and paginated. Use list_resource_types for valid resource_type values. Each row carries identity fields (account_id, region, type, arn, id, name, state); the view argument controls richness and filters narrow results server-side. Returns an object {items, count, total, next_cursor, queried, warnings} — queried says how many accounts and regions actually answered and warnings qualifies the result when some could not be reached or were skipped, so read them before treating an empty list as 'none exist'. For 'how many / group by' questions prefer count_resources, which returns tiny aggregates instead of every row."),
@@ -74,7 +74,7 @@ func (s *Server) registerTools() {
 		s.handleListResources,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"count_resources",
 			mcp.WithDescription("Aggregate AWS resources of a given type into group counts instead of listing every row — the efficient way to answer 'how many' and 'break down by' questions (by state, instance type, engine, tag, region, account). Returns {total, group_by, buckets:[{group, count}], queried, warnings}, sorted by descending count; read warnings, since a count has nothing in it to show that a region was unreachable or skipped. Shares the same filters as list_resources."),
@@ -104,7 +104,7 @@ func (s *Server) registerTools() {
 		s.handleCountResources,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_resources_fallback",
 			mcp.WithDescription("Last-resort lister for AWS resource types that list_resources does not support. Answers from the AWS Cloud Control API, which can enumerate almost any AWS::Service::Resource type without a dedicated implementation. Prefer list_resources whenever list_resource_types includes the type: it returns curated, typed attributes, while this tool returns the provider's own raw property names, cannot always determine an ARN, and reports no creation time. Types whose Cloud Control registry entry has no LIST handler return an error rather than an empty list. Returns {items, count, total, next_cursor, queried, warnings} — read warnings, they qualify the answer."),
@@ -145,6 +145,13 @@ func (s *Server) registerTools() {
 	s.registerAuthTools()
 	s.registerSavingsPlansTools()
 	s.registerGuideTools()
+
+	// The write tools are not merely refused in read-only mode, they do not
+	// exist: a tool that is listed gets called, and an agent cannot be talked
+	// into a write the server never offered. See write_tools.go.
+	if s.readWrite {
+		s.registerWriteTools()
+	}
 }
 
 func (s *Server) handleListResourceTypes(_ context.Context, _ mcp.CallToolRequest) (*mcp.CallToolResult, error) {

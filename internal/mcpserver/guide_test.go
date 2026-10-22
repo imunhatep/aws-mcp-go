@@ -20,12 +20,14 @@ import (
 // toolNamePattern matches identifiers shaped like this server's tool names.
 // Every tool starts with one of these verbs, so a mention of a renamed or
 // removed tool in the guide matches and is caught.
-var toolNamePattern = regexp.MustCompile(`\b(?:list|count|get|aws)_[a-z_]+\b`)
+var toolNamePattern = regexp.MustCompile(`\b(?:list|count|get|aws|create|update|delete|tag|untag|cancel)_[a-z_]+\b`)
 
 func registeredTools(t *testing.T) map[string]bool {
 	t.Helper()
 
-	srv := NewServer(context.Background(), nil, nil)
+	// Read-write mode registers a superset of read-only mode, and the guide
+	// documents both.
+	srv := NewServer(context.Background(), nil, nil, EnableWrites())
 
 	names := map[string]bool{}
 	for name := range srv.MCPServer().ListTools() {

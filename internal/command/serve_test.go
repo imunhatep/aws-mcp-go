@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/urfave/cli/v3"
 
 	ptypes "github.com/imunhatep/awslib/provider/types"
 
@@ -132,4 +133,54 @@ func TestBindsAllInterfaces(t *testing.T) {
 	for addr, want := range cases {
 		assert.Equal(t, want, bindsAllInterfaces(addr), addr)
 	}
+}
+
+// parseServeFlags runs the serve command's flag parsing with the action
+// replaced, so no server starts.
+func parseServeFlags(t *testing.T, args ...string) *config.Config {
+	t.Helper()
+
+	var cfg *config.Config
+
+	cmd := ServeCommand{}.Command()
+	cmd.Action = func(_ context.Context, cmd *cli.Command) error {
+		cfg = config.FromCommand(cmd)
+		return nil
+	}
+
+	require.NoError(t, cmd.Run(context.Background(), append([]string{"serve"}, args...)))
+	require.NotNil(t, cfg)
+
+	return cfg
+}
+
+// Read-only is the default, and the only way out of it is the explicit flag or
+// its environment variable.
+func TestServeIsReadOnlyByDefault(t *testing.T) {
+	t.Setenv("MCP_READ_WRITE", "")
+
+	cfg := parseServeFlags(t)
+	assert.False(t, cfg.ReadWrite)
+	assert.Empty(t, serverOptions(cfg))
+
+	srv := mcpserver.NewServer(context.Background(), nil, nil, serverOptions(cfg)...)
+	assert.False(t, srv.ReadWrite())
+	assert.NotContains(t, srv.MCPServer().ListTools(), "delete_resource")
+}
+
+func TestServeReadWriteFlag(t *testing.T) {
+	t.Setenv("MCP_READ_WRITE", "")
+
+	cfg := parseServeFlags(t, "--read-write")
+	assert.True(t, cfg.ReadWrite)
+
+	srv := mcpserver.NewServer(context.Background(), nil, nil, serverOptions(cfg)...)
+	assert.True(t, srv.ReadWrite())
+	assert.Contains(t, srv.MCPServer().ListTools(), "delete_resource")
+}
+
+func TestServeReadWriteFromEnv(t *testing.T) {
+	t.Setenv("MCP_READ_WRITE", "true")
+
+	assert.True(t, parseServeFlags(t).ReadWrite)
 }

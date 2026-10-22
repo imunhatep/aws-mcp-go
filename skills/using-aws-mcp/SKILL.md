@@ -1,15 +1,18 @@
 ---
 name: using-aws-mcp
-description: Use whenever a question is about AWS resources, inventory or spend and the aws MCP server (aws-mcp) is connected — "how many / list / which X do we have", "what does Y cost", "forecast", "what caused this cost anomaly", "savings plans", "why can't you see account Z". Covers choosing between list_resources, count_resources and list_resources_fallback (the Cloud Control fallback that serves almost every type NOT in list_resource_types — NAT gateways, ENIs, KMS keys, IAM roles, ECR, ElastiCache, MSK, OpenSearch, Kinesis, Step Functions, API Gateway, Transit Gateway…), reading the queried/warnings envelope, account scoping, Cost Explorer query recipes, forecasts, Cost Anomaly Detection findings and monitors, Savings Plans inventory and rates, and auth troubleshooting in every authentication mode.
+description: Use whenever a question is about AWS resources, inventory or spend and the aws MCP server (aws-mcp) is connected — "how many / list / which X do we have", "what does Y cost", "forecast", "what caused this cost anomaly", "savings plans", "why can't you see account Z". Covers choosing between list_resources, count_resources and list_resources_fallback (the Cloud Control fallback that serves almost every type NOT in list_resource_types — NAT gateways, ENIs, KMS keys, IAM roles, ECR, ElastiCache, MSK, OpenSearch, Kinesis, Step Functions, API Gateway, Transit Gateway…), reading the queried/warnings envelope, account scoping, Cost Explorer query recipes, forecasts, Cost Anomaly Detection findings and monitors, Savings Plans inventory and rates, auth troubleshooting in every authentication mode, and — only on a server started with --read-write — Cloud Control create/update/delete and bulk tagging.
 ---
 
 # Using the aws MCP server
 
-`aws-mcp` is a **read-only** MCP server: AWS inventory across every reachable
-account and region, plus Cost Explorer, Cost Anomaly Detection and Savings
-Plans. It fans out on the server, caches for 6h by default, and returns answers
-rather than raw API dumps.
-No tool writes anything.
+`aws-mcp` is a **read-only by default** MCP server: AWS inventory across every
+reachable account and region, plus Cost Explorer, Cost Anomaly Detection and
+Savings Plans. It fans out on the server, caches for 6h by default, and returns
+answers rather than raw API dumps.
+In the default mode no tool writes anything. Only a server started with
+`--read-write` also lists the write tools, which change real AWS resources (see
+[Writes](#writes-read-write-mode-only)). If `create_resource` is not in your
+tool list, the server is read-only. Say so; don't look for a way around it.
 
 This guide ships inside the server binary. The `aws_usage_guide` tool returns
 it, whole or one section at a time (`topic`). It lives in the aws-mcp repository
@@ -45,6 +48,9 @@ at `skills/using-aws-mcp/SKILL.md`, and changes with the tools it describes.
 | "What would a commitment cost" | `list_savings_plan_rates` |
 | Auth error, missing account | `aws_auth_status`, then `aws_sso_login` |
 | This guide | `aws_usage_guide` |
+| *Read-write mode only:* create / change / delete a resource | `create_resource`, `update_resource`, `delete_resource` |
+| *Read-write mode only:* tag or untag resources by ARN | `tag_resources`, `untag_resources` |
+| *Read-write mode only:* follow or cancel a write | `get_resource_request`, `list_resource_requests`, `cancel_resource_request` |
 
 If your client defers tool schemas (Claude Code's `ToolSearch`), load the ones
 you need first, e.g. `select:mcp__aws__list_resources,mcp__aws__list_resources_fallback`.
@@ -372,6 +378,75 @@ list_cost_anomalies {"period":"last_60_days","search":"Simple Storage","account_
 - **Coverage and utilization**: combine the plans with `get_cost_and_usage`
   grouped by `PURCHASE_TYPE`, or filtered on
   `RECORD_TYPE=SavingsPlanCoveredUsage`.
+
+## Writes (read-write mode only)
+
+These tools exist only when the server was started with `--read-write`
+(`MCP_READ_WRITE=true`). They change real infrastructure, using the server's
+credentials (or, in passthrough mode, the user's).
+
+### Before any write
+
+- **Confirm the target with the user**: account ID, region, resource type,
+  identifier, and the change itself. Do not act on an account or region you
+  inferred. `account_id` and `region` are required on every write tool, even
+  when the server reaches only one account.
+- **Read first.** Find the resource and its current properties with
+  `list_resources_fallback` (`view=detail`, plus `account_id` and `region`). Its
+  `id` is the `identifier` the write tools take, and its type name is the
+  `resource_type`.
+- **Prefer the smallest change.** Use `update_resource` with a one-operation
+  patch rather than delete-and-recreate. Use `tag_resources` rather than
+  patching `/Tags`.
+- **Check before you retry.** If you are unsure whether a write already went
+  out, call `list_resource_requests` before sending it again.
+
+### `create_resource` / `update_resource` / `delete_resource`
+
+These tools go through the Cloud Control API. They cover the same types, by the
+same CloudFormation names, that `list_resources_fallback` reads.
+
+- `create_resource`: `desired_state` is a JSON object in the type's
+  CloudFormation schema, e.g. `{"LogGroupName":"demo","RetentionInDays":7}`.
+- `update_resource`: `patch_document` is an RFC 6902 JSON Patch over the
+  current properties, e.g. `[{"op":"replace","path":"/RetentionInDays","value":30}]`.
+  Properties the schema marks create-only cannot be patched. Cloud Control
+  rejects the update instead of replacing the resource.
+- `delete_resource` is irreversible. Get explicit confirmation naming the
+  resource.
+- `wait_seconds` (default 120, max 900; `0` = return on acceptance) bounds how
+  long the call waits for the change to finish.
+
+### Reading a write result
+
+Every write tool returns `{account_id, region, request, done, properties, warnings}`:
+
+| What you see | What it means | What to do |
+|---|---|---|
+| Error result, "AWS did not accept the request, nothing was changed" | Rejected up front (validation, permissions) | Fix the input or report the missing permission |
+| `request.status` `SUCCESS`, `done: true` | Applied. `properties` is the resource as AWS holds it now | Report it |
+| `request.status` `FAILED`, error result | AWS accepted the request, then the handler rejected it. `error_code` (`AlreadyExists`, `NotFound`, `InvalidRequest`, …) and `status_message` say why | Report it; nothing to poll |
+| `done: false` (`PENDING` / `IN_PROGRESS`) | Still running when the wait ended | Poll `get_resource_request` with `request.request_token`. **Never resubmit**: a second create creates twice |
+
+`cancel_resource_request` stops a pending CREATE or UPDATE. A cancelled create
+can leave a partly created resource behind, so check afterwards.
+`list_resources_fallback` sees a write at once. `list_resources` and
+`count_resources` may serve the old state from cache for up to the TTL (6h by
+default).
+
+### `tag_resources` / `untag_resources`
+
+These tools tag by ARN, through the Resource Groups Tagging API. A call is
+synchronous and takes up to 200 ARNs. Every ARN must be in `account_id` and
+`region`. ARNs with an empty region segment (S3, IAM) are accepted, but tag
+each region in its own call.
+
+- `tags` is an object, e.g. `{"environment":"prod","creator-team":"sre"}`, and
+  overwrites only the given keys. `untag_resources` takes `keys`.
+- **Read `failed`.** AWS reports per-resource failures inside a successful
+  response, so `succeeded < requested` is a partial write, not an error. An
+  error result whose `error` says the write stopped part-way may still have
+  tagged earlier batches. Check before retrying.
 
 ## Auth and troubleshooting
 

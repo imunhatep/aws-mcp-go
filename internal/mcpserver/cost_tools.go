@@ -67,7 +67,7 @@ const costPeriodDescription = "Named time window: today, yesterday, last_7_days,
 // a billing API, not an inventory one, so it is queried directly rather than
 // through the resource proxy pool.
 func (s *Server) registerCostTools() {
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"get_cost_and_usage",
 			mcp.WithDescription("Query AWS Cost Explorer for actual spend and usage over a time window, with the same filtering and grouping the Cost Explorer console offers. Returns {total, groups, periods}: groups aggregate the whole window and are ranked by spend (use them for 'what costs the most'), periods split the same data by time (use them for trends). Group by up to 2 dimensions — SERVICE, LINKED_ACCOUNT, REGION, INSTANCE_TYPE, USAGE_TYPE, RECORD_TYPE, PURCHASE_TYPE, OPERATION, TAG:<key>, COST_CATEGORY:<key>. Call list_cost_dimensions for the full vocabulary and list_cost_dimension_values to discover the exact values a filter needs. Results are cached (default 6h)."),
@@ -110,7 +110,7 @@ func (s *Server) registerCostTools() {
 		s.handleGetCostAndUsage,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"get_cost_forecast",
 			mcp.WithDescription("Forecast AWS spend over a future time window using Cost Explorer's model, optionally narrowed by the same filters as get_cost_and_usage. Answers 'what will this month cost'. Returns a total plus a per-period breakdown; forecasts cannot be grouped."),
@@ -144,7 +144,7 @@ func (s *Server) registerCostTools() {
 		s.handleGetCostForecast,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_cost_dimension_values",
 			mcp.WithDescription("List the values a Cost Explorer dimension actually took over a time window — the way to discover the exact strings a get_cost_and_usage filter needs (AWS service names like 'Amazon Elastic Compute Cloud - Compute' rarely match what a caller would guess). For LINKED_ACCOUNT the attributes carry the account name."),
@@ -182,7 +182,7 @@ func (s *Server) registerCostTools() {
 		s.handleListCostDimensionValues,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_cost_dimensions",
 			mcp.WithDescription("Describe the Cost Explorer query vocabulary this server accepts: dimensions and their aliases, metrics, granularities, named time periods, match options and the filter row shape. Takes no arguments and makes no AWS calls — call it before building a non-trivial get_cost_and_usage query."),

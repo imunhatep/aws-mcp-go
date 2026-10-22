@@ -12,9 +12,10 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/configservice v1.74.4
 	github.com/aws/aws-sdk-go-v2/service/costexplorer v1.74.1
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.339.0
+	github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi v1.41.4
 	github.com/aws/aws-sdk-go-v2/service/savingsplans v1.40.4
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.4
-	github.com/imunhatep/awslib v0.13.0
+	github.com/imunhatep/awslib v0.14.0
 	github.com/imunhatep/gocollection v0.2.1
 	github.com/mark3labs/mcp-go v1.3.0
 	github.com/rs/zerolog v1.35.1
@@ -51,7 +52,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/lambda v1.112.1 // indirect
 	github.com/aws/aws-sdk-go-v2/service/pricing v1.49.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/rds v1.130.3 // indirect
-	github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi v1.41.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/route53 v1.70.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/route53domains v1.44.4 // indirect
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.114.3 // indirect

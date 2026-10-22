@@ -85,6 +85,11 @@ func (c ServeCommand) Command() *cli.Command {
 				Usage:   "hold no AWS credentials on the server: every request must forward them in the " + mcpserver.CredentialsHeader + " header (produced client-side by 'aws-mcp credentials-headers', registered as the MCP headersHelper). Cannot be combined with --profiles or the assume-role flags",
 				Sources: cli.EnvVars("MCP_CREDENTIALS_PASSTHROUGH"),
 			},
+			&cli.BoolFlag{
+				Name:    "read-write",
+				Usage:   "also register the write tools (create_resource, update_resource, delete_resource, tag_resources, untag_resources, cancel_resource_request), which change real AWS resources with the server's or the forwarded credentials. Off by default: the server is read-only and lists no tool that can change AWS",
+				Sources: cli.EnvVars("MCP_READ_WRITE"),
+			},
 		},
 		Action: c.run,
 	}
@@ -117,7 +122,7 @@ func (c ServeCommand) run(ctx context.Context, cmd *cli.Command) error {
 
 	// The enabled-region lookup is cached on the same TTL as client failures:
 	// both record something about an account that only a deliberate act changes.
-	srv := mcpserver.NewServer(ctx, pool, dc).
+	srv := mcpserver.NewServer(ctx, pool, dc, serverOptions(cfg)...).
 		WithRegionTTL(failureTTL(cfg)).
 		WithAuth(login, profileNames(cfg))
 
@@ -149,11 +154,26 @@ func servePassthrough(ctx context.Context, cfg *config.Config, dc *cache.DataCac
 		log.Info().Msg("[serve] the resource cache is keyed by account, not by caller: callers forwarding different roles in the same account share cached listings; use --no-cache if that matters")
 	}
 
-	srv := mcpserver.NewServer(ctx, nil, dc).
+	srv := mcpserver.NewServer(ctx, nil, dc, serverOptions(cfg)...).
 		WithRegionTTL(failureTTL(cfg)).
 		WithPassthrough(mcpserver.NewPassthroughPools(ctx).WithFailureTTL(failureTTL(cfg)))
 
 	return srv.ServeHTTP(ctx, cfg.Addr)
+}
+
+// serverOptions turns the mode flags into server options. Read-only is the
+// default and needs none; --read-write is announced at warn level, so a log
+// reader can tell at a glance that this instance can change AWS.
+func serverOptions(cfg *config.Config) []mcpserver.Option {
+	if !cfg.ReadWrite {
+		log.Info().Msg("[serve] read-only mode: no tool that changes AWS is registered; pass --read-write to enable the write tools")
+
+		return nil
+	}
+
+	log.Warn().Msg("[serve] read-write mode: write tools are registered and can create, change, tag and delete real AWS resources")
+
+	return []mcpserver.Option{mcpserver.EnableWrites()}
 }
 
 // bindsAllInterfaces reports whether a listen address accepts connections from

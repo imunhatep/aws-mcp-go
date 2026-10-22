@@ -2,7 +2,8 @@
 
 An [MCP](https://modelcontextprotocol.io) server that lets an AI assistant answer
 questions about your AWS estate — inventory across every account and region, and
-what it all costs — without handing it a shell or write access.
+what it all costs — without handing it a shell or, unless you opt in, write
+access.
 
 ```
 "How many running m5 instances do we have in prod?"
@@ -16,7 +17,9 @@ read-only tools that do the fan-out server-side and return *answers*:
 `count_resources` aggregates without shipping rows, filters and views cut
 payloads to what was asked for, everything is cached (default 6h), and Cost
 Explorer queries are validated before they are billed. It is read-only by
-construction — no tool mutates anything.
+default: unless the server is started with `--read-write`, no tool that can
+change AWS is even registered, and every tool it does register is annotated
+`readOnlyHint` for clients that gate on it.
 
 It is a thin MCP layer over [`awslib`](https://github.com/imunhatep/awslib),
 which does the actual AWS work.
@@ -74,6 +77,17 @@ question you ask.
 | `list_savings_plans` | "what are we committed to" — purchased Savings Plans, hourly commitment, terms, what expires next |
 | `list_savings_plan_rates` | "what would a commitment cost" — published Savings Plan rates per region, term and payment option |
 
+With `--read-write` (`MCP_READ_WRITE=true`) the server also registers write
+tools. Each one acts on exactly one named account and region:
+
+| Tool (read-write mode only) | Does |
+|------|---------|
+| `create_resource`, `update_resource`, `delete_resource` | Create, JSON-Patch or delete almost any `AWS::Service::Resource` type through Cloud Control, waiting for the result |
+| `tag_resources`, `untag_resources` | Set or remove tags on up to 200 resources by ARN |
+| `get_resource_request`, `list_resource_requests`, `cancel_resource_request` | Follow, audit or cancel a Cloud Control request |
+
+See [Write tools](docs/write-tools.md) before enabling it.
+
 Curated coverage spans EC2, RDS, ELB, ECS, EKS, Lambda, DynamoDB, S3, Route53,
 Secrets Manager, EFS, SQS, SNS, IAM, Auto Scaling and CloudFront — call
 `list_resource_types` for the current list. Those types get hand-picked
@@ -102,6 +116,7 @@ works as a standalone Claude Code skill.
 | [Authentication](docs/authentication.md) | Local, multi-profile, assume-role and credential-passthrough modes; the startup credential checks |
 | [Running in a container](docs/container.md) | Multi-account AWS SSO with podman, image builds, cache volumes, troubleshooting |
 | [Resource tools](docs/tools.md) | `list_resources` views/filters/pagination, `count_resources` aggregation, `list_resources_fallback` for unsupported types |
+| [Write tools](docs/write-tools.md) | `--read-write` mode: what it enables, the safety rules, result semantics, IAM permissions |
 | [Cost Explorer](docs/cost-explorer.md) | Periods, groupings, filter shape, response layout, per-request billing, cost anomalies and monitors, IAM permissions |
 | [Savings Plans](docs/savings-plans.md) | Purchased plans and offering rates: why region is a filter, the defaults, the summary |
 | [Configuration](docs/configuration.md) | Commands, flags and environment variables, caching, client config |

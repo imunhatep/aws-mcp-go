@@ -39,6 +39,10 @@ type Config struct {
 	// own: every request must forward them in the X-Aws-Credentials header,
 	// and one without them is refused.
 	CredentialsPassthrough bool
+	// ReadWrite registers the write tools (create/update/delete resources, tag
+	// and untag, cancel requests). Off by default: without it the server
+	// exposes only tools that cannot change AWS.
+	ReadWrite bool
 }
 
 // FromCommand builds a Config from the serve command's flags.
@@ -55,6 +59,7 @@ func FromCommand(cmd *cli.Command) *Config {
 		SSOOpenBrowser: cmd.Bool("sso-open-browser"),
 
 		CredentialsPassthrough: cmd.Bool("credentials-passthrough"),
+		ReadWrite:              cmd.Bool("read-write"),
 	}
 }
 

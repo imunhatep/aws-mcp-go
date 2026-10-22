@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/rs/zerolog/log"
 
@@ -104,6 +105,64 @@ type Server struct {
 	// passthrough is set in credential-passthrough mode, where every request
 	// brings its own AWS credentials and pool is nil. See passthrough.go.
 	passthrough *PassthroughPools
+
+	// readWrite registers the write tools (write_tools.go). Off by default: a
+	// server nobody configured for writes exposes no tool that can change AWS.
+	readWrite bool
+
+	// newCloudControl and newTagger override how the write tools build their
+	// AWS repositories; nil means awslib's. Tests set them to run the write
+	// handlers without AWS.
+	newCloudControl func(ctx context.Context, client *v3.Client) cloudControlWriter
+	newTagger       func(ctx context.Context, client *v3.Client) resourceTagger
+}
+
+// Option configures a Server at construction. It exists for the settings that
+// decide which tools are registered and what the initialize instructions say,
+// neither of which can change once NewServer has returned.
+type Option func(*Server)
+
+// EnableWrites registers the write tools alongside the read-only ones. Without
+// it the server exposes no tool that can create, change, tag or delete an AWS
+// resource.
+func EnableWrites() Option {
+	return func(s *Server) { s.readWrite = true }
+}
+
+// ReadWrite reports whether the write tools are registered.
+func (s *Server) ReadWrite() bool {
+	return s.readWrite
+}
+
+// readOnlyTool marks a tool as one that never changes its environment.
+//
+// mcp.NewTool defaults every tool to readOnlyHint=false, destructiveHint=true,
+// so without this a client that gates on annotations would treat a resource
+// listing exactly like a delete.
+func readOnlyTool(tool mcp.Tool) mcp.Tool {
+	tool.Annotations.ReadOnlyHint = mcp.ToBoolPtr(true)
+	tool.Annotations.DestructiveHint = mcp.ToBoolPtr(false)
+	tool.Annotations.IdempotentHint = mcp.ToBoolPtr(true)
+
+	return tool
+}
+
+// addReadOnlyTool registers a tool that reads AWS or local state and changes
+// neither. Every tool registered in read-only mode goes through this or
+// addLocalStateTool; TestReadOnlyModeRegistersOnlyReadOnlyTools pins it.
+func (s *Server) addReadOnlyTool(tool mcp.Tool, handler server.ToolHandlerFunc) {
+	s.mcp.AddTool(readOnlyTool(tool), handler)
+}
+
+// addLocalStateTool registers a tool that changes local state on the server
+// host — the SSO token cache — but never an AWS resource, which is why it is
+// available in read-only mode.
+func (s *Server) addLocalStateTool(tool mcp.Tool, handler server.ToolHandlerFunc) {
+	tool.Annotations.ReadOnlyHint = mcp.ToBoolPtr(false)
+	tool.Annotations.DestructiveHint = mcp.ToBoolPtr(false)
+	tool.Annotations.IdempotentHint = mcp.ToBoolPtr(true)
+
+	s.mcp.AddTool(tool, handler)
 }
 
 // WithPassthrough switches the server to credential-passthrough mode: AWS is
@@ -126,13 +185,23 @@ func (s *Server) WithAuth(login *SSOLoginManager, profiles []string) *Server {
 }
 
 // NewServer builds an MCP server around the given client pool. dc may be nil to
-// disable caching.
-func NewServer(ctx context.Context, pool ClientPool, dc *cache.DataCache) *Server {
+// disable caching. With no options the server is read-only: EnableWrites is the
+// only way to register a tool that changes AWS.
+func NewServer(ctx context.Context, pool ClientPool, dc *cache.DataCache, opts ...Option) *Server {
 	s := &Server{
 		ctx:     ctx,
 		pool:    pool,
 		cache:   dc,
 		regions: newRegionCache(DefaultCacheTTL),
+	}
+
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	instructions := serverInstructions
+	if s.readWrite {
+		instructions = readWriteInstructions
 	}
 
 	s.mcp = server.NewMCPServer(
@@ -141,7 +210,7 @@ func NewServer(ctx context.Context, pool ClientPool, dc *cache.DataCache) *Serve
 		server.WithToolCapabilities(true),
 		server.WithRecovery(),
 		server.WithLogging(),
-		server.WithInstructions(serverInstructions),
+		server.WithInstructions(instructions),
 	)
 
 	s.registerTools()
@@ -210,6 +279,7 @@ func (s *Server) ServeHTTP(ctx context.Context, addr string) error {
 		Str("addr", addr).
 		Str("endpoint", mcpEndpointPath).
 		Bool("credentials_passthrough", s.passthrough != nil).
+		Bool("read_write", s.readWrite).
 		Msg("[mcpserver.ServeHTTP] starting MCP streamable-HTTP server")
 
 	errCh := make(chan error, 1)

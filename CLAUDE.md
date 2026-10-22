@@ -22,7 +22,7 @@ Version/commit are injected at build time via `-ldflags` into `internal/version`
 
 ### awslib dependency
 
-`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.13.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
+`awslib` is a plain tagged dependency (`github.com/imunhatep/awslib v0.14.0` in `require`), resolved from the module proxy — there is **no `replace` directive** and no local checkout is needed to build. To try an unreleased `awslib` change, add one temporarily (`go mod edit -replace github.com/imunhatep/awslib=../pkgs/awslib && go mod tidy && go mod vendor`) and drop it before committing; CI builds the committed `go.mod` as-is and a stray `replace` would fail there.
 
 The repo vendors its dependencies (`vendor/`), so run `go mod tidy && go mod vendor` after any dependency change or the build fails with "inconsistent vendoring". `vendor/` is gitignored — it is a local build input, not committed state.
 
@@ -41,7 +41,7 @@ Request flow, outermost to innermost:
 
 - `cmd/aws-mcp/main.go` → `internal.NewApp()` (root `urfave/cli/v3` command, global `--verbose`/`zerolog` setup) → attaches `command.ServeCommand` and `command.VersionCommand`.
 - `internal/command/serve.go` is the composition root for `serve`: parses flags into `internal/config.Config`, builds the SSO login manager, builds the client pool (lazily — see below), builds the cache, then `mcpserver.NewServer(...).WithAuth(...)` + `ServeHTTP` (streamable-HTTP transport, endpoint `/mcp`).
-- `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools, `registerAnomalyTools()` (in `anomaly_tools.go`) for the Cost Anomaly Detection tools, `registerAuthTools()` (in `auth_tools.go`) for `aws_auth_status` / `aws_sso_login`, `registerSavingsPlansTools()` (in `savingsplans_tools.go`) for the Savings Plans tools, and `registerGuideTools()` (in `guide.go`) for `aws_usage_guide`; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go` and the Savings Plans ones in `savingsplans.go`.
+- `internal/mcpserver` is the core. `Server` holds a `ClientPool`, an optional `*cache.DataCache`, and the `mcp-go` server. `registerTools()` (in `tools.go`) declares the resource tools (`list_resource_types`, `list_regions`, `list_accounts`, `list_resources`, `count_resources`) then calls `registerCostTools()` (in `cost_tools.go`) for the Cost Explorer tools, `registerAnomalyTools()` (in `anomaly_tools.go`) for the Cost Anomaly Detection tools, `registerAuthTools()` (in `auth_tools.go`) for `aws_auth_status` / `aws_sso_login`, `registerSavingsPlansTools()` (in `savingsplans_tools.go`) for the Savings Plans tools, `registerGuideTools()` (in `guide.go`) for `aws_usage_guide`, and — only when `--read-write` set `EnableWrites()` — `registerWriteTools()` (in `write_tools.go`) for the write tools; handlers translate MCP calls into awslib pipeline runs. Query mechanics (fetch, filter, paginate, aggregate) live in `query.go`, the cost equivalents in `cost.go` and the Savings Plans ones in `savingsplans.go`.
 
 ### The ClientPool abstraction (why the auth modes are transparent)
 
@@ -143,7 +143,7 @@ Things worth keeping:
 - **`feedback=none` is a client-side filter** — the API can filter on a given feedback but not on its absence, and "what has nobody triaged" is the question. `search` is client-side too; `min_impact`, `feedback` (other values) and `monitor_arn` go to the API.
 - **Partial failure is a warning, total failure an error** (`collectAnomalies`), the same rule as Savings Plans inventory. Monitors without readable subscriptions are still returned, with a warning.
 - **Every root cause is kept**, sorted by contribution — the reason to use the API over the alert email. The `summary` covers every match, not the truncated page. Row `account_id` is the monitor owner; the root cause `linked_account` is where the spend happened.
-- The write side (`ProvideAnomalyFeedback`, monitor/subscription CRUD) is not exposed: the server is read-only.
+- The anomaly write side (`ProvideAnomalyFeedback`, monitor/subscription CRUD) is not exposed, not even in `--read-write` mode: the write tools are Cloud Control and tagging only (see *Read-only by default*).
 
 ### Savings Plans data path (`savingsplans.go`, `savingsplans_tools.go`)
 
@@ -187,6 +187,20 @@ Four rules hold this together:
 - **Narrowing is never silent, and never overrides an explicit `region`.** What was skipped, and why, goes into the same `warnings` array as the unreachable pairs. A caller that cannot see the narrowing cannot tell it from a smaller estate.
 
 The result is cached per account by `regionCache` on the TTL passed to `Server.WithRegionTTL` (`serve.go` gives it the same value as the client-failure cache, since both record something a deliberate act changes). This is not a substitute for `v3.FailureCache`: that makes a repeat of a known-bad pair cheap, this avoids asking at all — which is what the first sweep after a restart needs.
+### Read-only by default; writes behind `--read-write` (`write.go`, `write_tools.go`)
+
+The server is read-only unless `serve --read-write` (`MCP_READ_WRITE`) is given, which `serverOptions` in `serve.go` turns into `mcpserver.EnableWrites()`. That option has to be passed **to `NewServer`**, not applied afterwards, because it decides two things fixed at construction: whether `registerTools` calls `registerWriteTools`, and whether the initialize instructions are `serverInstructions` or `readWriteInstructions` (`guide.go`; both share `instructionRules`).
+
+Read-only is enforced by **absence, not refusal**: in the default mode the write tools are never registered, so no prompt can reach them. Every read-mode tool is registered through `addReadOnlyTool` (sets `readOnlyHint=true`, `destructiveHint=false`) — needed because `mcp.NewTool` defaults to `readOnlyHint=false, destructiveHint=true`, which made every listing look like a delete to annotation-gating clients. `aws_sso_login` uses `addLocalStateTool` (writes the token cache, never AWS). `TestReadOnlyModeRegistersOnlyReadOnlyTools` fails if a new tool is registered in read-only mode with raw `s.mcp.AddTool`; `TestReadWriteModeAddsExactlyTheWriteTools` pins the write set. The guide tests build a read-write server, so write tools must be documented in `SKILL.md` too.
+
+The write tools: `create_resource` / `update_resource` / `delete_resource` / `get_resource_request` / `list_resource_requests` / `cancel_resource_request` over awslib's Cloud Control write repository (v0.14.0), and `tag_resources` / `untag_resources` over `resourcegroupstagging`. Rules worth keeping:
+
+- **Every write names its target.** `account_id` and `region` are required even on a single-account pool — no inferred targets. `resolveWriteTarget` goes through `poolClients` (scoped, per the account-scoping rule), demands exactly one client, and re-checks the client's account/region before sending.
+- **Validate before AWS** (`parseWriteScope`, `parseDesiredState`, `parsePatchDocument`, `parseTagArns`, `parseTags`). `TestWriteToolsValidateBeforeCallingAWS` uses the nil-pool tripwire. Tag ARNs whose account/region segment differs from the target are rejected up front.
+- **An accepted request is never an error result.** `runResourceWrite` submits with the split form (`CreateResource` + `WaitForResourceRequest`) rather than `*AndWait`, so the request token survives a timeout; a wait timeout or unreadable status returns `done:false` + token + "do not resubmit", because an error invites a retry and a retried create creates twice. Only a rejected submission, or a terminal `FAILED`/`CANCEL_COMPLETE` (`*cloudcontrol.RequestFailedError`, carrying `error_code`), is `IsError`. Tag writes: partial failure is a result, total failure or a mid-batch error is `IsError` with the warning that earlier batches may have landed.
+- **Cache.** With a cache, writes use `CloudControlRepositoryCached`, which evicts the account/region's Cloud Control lists on acceptance; `runResourceWrite` calls `InvalidateLists()` again after the wait. Typed `list_resources` caches cannot be evicted by a write and the result says so (`writeCacheWarning`).
+- `cloudControlWriter` / `resourceTagger` are local interfaces and `Server.newCloudControl` / `newTagger` are test seams; the handlers are tested in `write_test.go` without AWS.
+
 ### Credentials are never fatal (`lazypool.go`, `ssologin.go`, `auth_tools.go`)
 
 An MCP server that exits when credentials are unusable hands the calling agent a refused connection — no explanation, no recovery. This used to happen: `buildClientPool` resolved credentials during `serve`, so an expired SSO token reached `main` and `os.Exit(1)`. Three pieces prevent it, and the property they defend is *always answer, never exit*:

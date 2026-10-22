@@ -17,7 +17,7 @@ import (
 
 // registerAuthTools declares the credential inspection and login tools.
 func (s *Server) registerAuthTools() {
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"aws_auth_status",
 			mcp.WithDescription("Report the AWS credential state of this server: every configured profile, how it authenticates, which account it serves, whether it is currently usable, its SSO token expiry, and any login in progress. Call this when another tool reports an authentication failure — it says whether a login is needed and which command or URL fixes it, without touching AWS."),
@@ -28,7 +28,9 @@ func (s *Server) registerAuthTools() {
 		s.handleAuthStatus,
 	)
 
-	s.mcp.AddTool(
+	// Not read-only in MCP's sense — it writes the SSO token cache — but it is
+	// the way out of an expired session, so it is registered in every mode.
+	s.addLocalStateTool(
 		mcp.NewTool(
 			"aws_sso_login",
 			mcp.WithDescription("Start (or pick up) an AWS SSO login for a profile and return the verification URL and user code the user must confirm in a browser. The server polls for approval and caches the token itself, so once the user confirms, retry the original tool — no restart is needed. Relay the URL and code to the user verbatim; approval requires a human."),

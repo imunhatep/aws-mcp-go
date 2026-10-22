@@ -22,7 +22,7 @@ import (
 // anomaly that is still running keeps moving its end date and impact, so the
 // default 6h window would answer "what was anomalous this morning".
 func (s *Server) registerAnomalyTools() {
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_cost_anomalies",
 			mcp.WithDescription("List the spend anomalies AWS Cost Anomaly Detection found, each with its total and peak impact in USD, actual versus expected spend, and ALL of its root causes (service, region, usage type, linked account, dollar contribution) — the alert email shows only the top few. Answers 'what caused this cost anomaly', 'which anomalies hit us this month' and 'what has nobody triaged'. The window matches each anomaly's END date: an anomaly that began before the window but is still running is included. History goes back 90 days. Returns {items, count, total, summary, window, accounts_queried}, items ranked by total impact; the summary totals impact across every match, not just the returned page. Read live, not cached. Then use get_cost_and_usage filtered on a root cause's SERVICE / USAGE_TYPE / REGION for the daily trend, and list_resources to find what is behind it."),
@@ -57,7 +57,7 @@ func (s *Server) registerAnomalyTools() {
 		s.handleListCostAnomalies,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_cost_anomaly_monitors",
 			mcp.WithDescription("List the Cost Anomaly Detection monitors — what each watches (AWS services, linked accounts, a cost category or tag) and when it last evaluated — with the alert subscriptions on each: who is notified, how often and above which threshold. Answers 'is this spend monitored at all', 'who got this alert' and 'why did nobody get alerted'. Returns {monitors, unattached_subscriptions, accounts_queried}. Read live, not cached."),

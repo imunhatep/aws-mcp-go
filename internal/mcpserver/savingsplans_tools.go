@@ -19,7 +19,7 @@ import (
 // commitment, not an inventory item — and are answered from awslib's
 // service/savingsplans repository directly.
 func (s *Server) registerSavingsPlansTools() {
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_savings_plans",
 			mcp.WithDescription("List the Savings Plans an account has purchased — EC2 Instance, Compute, SageMaker and Database plans — with their commitment, term, payment option and how long they still run. Answers 'which EC2 savings plans do we hold', 'what are we committed to per hour' and 'what expires soon'. Defaults to active plans only, since retired and payment-failed plans stay listed and would overstate coverage. Returns {items, count, total, summary, accounts_queried}; the summary totals the hourly commitment and upfront payment per currency and names the plan expiring next. Plans are account-wide, not regional — the region field is the region an EC2 Instance plan is locked to. Read live, not cached, because a stale answer to 'what do we own' misleads."),
@@ -48,7 +48,7 @@ func (s *Server) registerSavingsPlansTools() {
 		s.handleListSavingsPlans,
 	)
 
-	s.mcp.AddTool(
+	s.addReadOnlyTool(
 		mcp.NewTool(
 			"list_savings_plan_rates",
 			mcp.WithDescription("Look up what a Savings Plan commitment would cost: the discounted hourly rates on offer for a product in a region, per plan type, payment option and term. Answers 'what would an m5.2xlarge cost under a 3-year EC2 Instance plan in eu-central-1'. These are public prices, not this account's usage — for what is actually being spent use get_cost_and_usage, and for what is already committed use list_savings_plans. region is required, and so is instance_type or instance_family: unfiltered, this is a sweep of thousands of pages of the price list. Defaults to EC2, Linux/UNIX, shared tenancy, and returns every plan type, payment option and term so they can be compared side by side. Results are cached (default 6h) since published prices change rarely."),

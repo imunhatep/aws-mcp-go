@@ -20,6 +20,7 @@
 | `--assume-role` | | `false` | Auto-discover assumable roles from the current IAM role |
 | `--assume-role-arns` | `MCP_ASSUME_ROLE_ARNS` | | Explicit assumable role ARNs (implies assume-role mode) |
 | `--credentials-passthrough` | `MCP_CREDENTIALS_PASSTHROUGH` | `false` | Hold no AWS credentials; use only those each request forwards in `X-Aws-Credentials` (excludes `--profiles` and the assume-role flags) |
+| `--read-write` | `MCP_READ_WRITE` | `false` | Also register the [write tools](write-tools.md) (create/update/delete resources, tag/untag, cancel requests). Off = read-only: no tool that can change AWS is listed |
 | `--sso-auto-login` | `MCP_SSO_AUTO_LOGIN` | `true` | On an expired-beyond-refresh SSO session, start a device-authorization flow and return its URL and user code in the failing tool result |
 | `--sso-open-browser` | `MCP_SSO_OPEN_BROWSER` | `true` | Also open that URL locally; best-effort, skipped in a container |
 | `--verbose` / `-v` | `AWS_MCP_VERBOSE`, `LOG_LEVEL` | `3` | Log verbosity: `0`=fatal … `5`=trace (global flag) |
