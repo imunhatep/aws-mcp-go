@@ -11,6 +11,7 @@ import (
 
 	"github.com/imunhatep/awslib/service"
 	"github.com/imunhatep/awslib/service/cfg"
+	"github.com/imunhatep/awslib/service/cloudcontrol"
 )
 
 // SupportedResourceTypes returns the resource types the MCP server is able to
@@ -60,7 +61,10 @@ func SupportedResourceTypes() []awscfg.ResourceType {
 		awscfg.ResourceTypeVPCEndpoint,
 		awscfg.ResourceTypeRouteTable,
 		awscfg.ResourceTypeEip,
-		// cloudfront (SaaS Manager; global control plane)
+		awscfg.ResourceTypeNetworkInterface,
+		// cloudfront (global control plane): classic distributions and the
+		// SaaS Manager types
+		awscfg.ResourceTypeDistribution,
 		cfg.ResourceTypeCloudFrontDistributionTenantSummary,
 		cfg.ResourceTypeCloudFrontConnectionGroup,
 		// cloudwatch
@@ -236,7 +240,7 @@ func buildResourceDTO(r service.ResourceInterface, attrs map[string]any, view re
 	}
 
 	if view == viewDetail {
-		if raw, err := json.Marshal(r); err != nil {
+		if raw, err := json.Marshal(rawEntity(r)); err != nil {
 			log.Warn().Err(err).Str("id", r.GetIdOrArn()).Msg("[mcpserver.buildResourceDTO] failed to marshal full resource detail")
 		} else {
 			dto.Raw = raw
@@ -244,4 +248,19 @@ func buildResourceDTO(r service.ResourceInterface, attrs map[string]any, view re
 	}
 
 	return dto
+}
+
+// rawEntity is what the detail view serializes for a resource. A Cloud Control
+// resource carries its property bag twice — the Properties JSON string from the
+// API and the parsed Attributes map built from it — and marshalling both
+// doubled every fallback row (one CloudFront distribution came to ~110k
+// characters, enough to overflow a tool result). Attributes is kept, since it
+// is structured; the string is dropped.
+func rawEntity(r service.ResourceInterface) any {
+	if res, ok := r.(cloudcontrol.Resource); ok {
+		res.Properties = nil
+		return res
+	}
+
+	return r
 }

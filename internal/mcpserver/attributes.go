@@ -123,6 +123,35 @@ func summaryAttributes(r service.ResourceInterface) map[string]any {
 			m["state"] = "unassociated"
 		}
 
+	case ec2.NetworkInterface:
+		// The only typed source for public addresses that are not Elastic IPs:
+		// an internet-facing NLB's per-AZ frontend address lives here and
+		// nowhere in DescribeLoadBalancers. description names the owner of a
+		// requester-managed interface ("ELB net/<name>/<id>"), so it is the
+		// filter that finds a given load balancer's addresses.
+		addStr(m, "state", string(e.GetStatus()))
+		addStr(m, "interface_type", string(e.GetInterfaceType()))
+		addStr(m, "description", e.GetDescription())
+		addStr(m, "private_ip", e.GetPrivateIpAddress())
+		addStr(m, "public_ip", e.GetPublicIp())
+		if e.Association != nil {
+			addStr(m, "public_dns_name", aws.ToString(e.Association.PublicDnsName))
+		}
+		if e.GetPublicIp() != "" {
+			m["elastic_ip"] = e.IsElasticIp()
+		}
+		if ips := e.GetPrivateIpAddresses(); len(ips) > 1 {
+			m["private_ips"] = ips
+		}
+		if ips := e.GetPublicIps(); len(ips) > 1 {
+			m["public_ips"] = ips
+		}
+		addStr(m, "instance_id", e.GetInstanceId())
+		m["requester_managed"] = e.IsRequesterManaged()
+		addStr(m, "vpc_id", aws.ToString(e.VpcId))
+		addStr(m, "subnet_id", aws.ToString(e.SubnetId))
+		addStr(m, "availability_zone", aws.ToString(e.AvailabilityZone))
+
 	case rds.DbInstance:
 		addStr(m, "engine", e.GetEngine())
 		addStr(m, "engine_version", e.GetEngineVersion())
@@ -280,6 +309,26 @@ func summaryAttributes(r service.ResourceInterface) map[string]any {
 		}
 		addTime(m, "last_modified_at", e.LastModifiedTime)
 
+	case cloudfront.Distribution:
+		addStr(m, "state", e.GetStatus())
+		addBool(m, "enabled", e.Enabled)
+		addStr(m, "domain_name", e.GetDomainName())
+		if aliases := e.GetAliases(); len(aliases) > 0 {
+			m["aliases"] = aliases
+		}
+		if origins := distributionOrigins(e); len(origins) > 0 {
+			m["origins"] = origins
+		}
+		if e.DefaultCacheBehavior != nil {
+			addStr(m, "default_origin_id", aws.ToString(e.DefaultCacheBehavior.TargetOriginId))
+		}
+		addStr(m, "web_acl_id", e.GetWebACLId())
+		addStr(m, "price_class", string(e.PriceClass))
+		if e.ViewerCertificate != nil {
+			addStr(m, "certificate_arn", aws.ToString(e.ViewerCertificate.ACMCertificateArn))
+		}
+		addTime(m, "last_modified_at", e.LastModifiedTime)
+
 	case cloudfront.ConnectionGroup:
 		addStr(m, "state", aws.ToString(e.Status))
 		addBool(m, "enabled", e.Enabled)
@@ -307,6 +356,37 @@ func summaryAttributes(r service.ResourceInterface) map[string]any {
 	}
 
 	return m
+}
+
+// distributionOrigins reduces a distribution's origins to what is asked about
+// them — where each one points and what kind it is — leaving out the timeouts,
+// headers and shield settings that make the raw form large.
+func distributionOrigins(d cloudfront.Distribution) []map[string]any {
+	origins := d.GetOrigins()
+	if len(origins) == 0 {
+		return nil
+	}
+
+	out := make([]map[string]any, 0, len(origins))
+	for _, o := range origins {
+		origin := map[string]any{}
+		addStr(origin, "id", aws.ToString(o.Id))
+		addStr(origin, "domain_name", aws.ToString(o.DomainName))
+		addStr(origin, "path", aws.ToString(o.OriginPath))
+
+		switch {
+		case o.S3OriginConfig != nil:
+			origin["kind"] = "s3"
+		case o.VpcOriginConfig != nil:
+			origin["kind"] = "vpc"
+		case o.CustomOriginConfig != nil:
+			origin["kind"] = "custom"
+		}
+
+		out = append(out, origin)
+	}
+
+	return out
 }
 
 // attributeProvider is implemented by entities that carry their own untyped

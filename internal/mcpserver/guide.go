@@ -40,9 +40,10 @@ const readWriteInstructions = `aws-mcp: AWS inventory, Cost Explorer, Cost Anoma
 - Writes (create_resource, update_resource, delete_resource, tag_resources, untag_resources, cancel_resource_request) act on exactly one account and region. Confirm the target account, region and identifier with the user before calling one, never act on an inferred target, and read the returned status: IN_PROGRESS means not done yet — poll get_resource_request. Call aws_usage_guide with topic 'writes' first.`
 
 // instructionRules are the rules both modes share.
-const instructionRules = `- list_resource_types lists the curated types for list_resources and count_resources. ANY other type (NAT gateways, ENIs, KMS keys, IAM roles, ECR, MSK, OpenSearch, Kinesis, ...) is served by list_resources_fallback through Cloud Control, using its CloudFormation name (e.g. AWS::EC2::NatGateway). Never call a type unsupported until list_resources_fallback has returned an error for it.
+const instructionRules = `- list_resource_types lists the curated types for list_resources and count_resources. ANY other type (NAT gateways, KMS keys, IAM roles, ECR, MSK, OpenSearch, Kinesis, ...) is served by list_resources_fallback through Cloud Control, using its CloudFormation name (e.g. AWS::EC2::NatGateway). Never call a type unsupported until list_resources_fallback has returned an error for it.
 - Read queried and warnings in every resource response before treating an empty list or a count as complete, and report unreachable accounts or regions.
 - Pass account_id to scope a query to one account: only that account is contacted. Pass region whenever the question allows. Prefer count_resources for "how many" and "break down by".
+- The default view=id omits IPs and every other attribute; use view=summary for public_ip/private_ip, origins and the like before concluding they are unavailable.
 - Cost Explorer bills per request: get exact filter values from list_cost_dimension_values before filtering get_cost_and_usage.
 - On an authentication error, call aws_auth_status; it says which login fixes it.
 - Before a non-trivial fallback, Cost Explorer, cost anomaly or Savings Plans query, call aws_usage_guide (optionally with a topic) for the full guide.`

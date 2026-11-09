@@ -26,6 +26,7 @@ var vpcNetworkingTypes = []awscfg.ResourceType{
 	awscfg.ResourceTypeVPCEndpoint,
 	awscfg.ResourceTypeRouteTable,
 	awscfg.ResourceTypeEip,
+	awscfg.ResourceTypeNetworkInterface,
 }
 
 // TestVpcNetworkingTypesSupported pins the allowlist against the drift that sent
@@ -223,4 +224,116 @@ func TestSummaryAttributes_VpcNetworking(t *testing.T) {
 		assert.Equal(t, true, attrs["is_main"])
 		assert.Equal(t, 3, attrs["routes"])
 	})
+}
+
+// nlbNetworkInterface is one AZ's interface of an internet-facing NLB with no
+// Elastic IP: DescribeLoadBalancers reports no address for it, and Cloud
+// Control's AWS::EC2::NetworkInterface carries no public address either, so this
+// entity is the only place the frontend IP can come from.
+func nlbNetworkInterface() ec2.NetworkInterface {
+	return ec2.NetworkInterface{
+		AbstractResource: service.AbstractResource{
+			AccountID: ptypes.AwsAccountID("111111111111"),
+			Region:    ptypes.AwsRegion("af-south-1"),
+			ID:        "eni-092a6e24ee8701c61",
+			Type:      awscfg.ResourceTypeNetworkInterface,
+		},
+		NetworkInterface: ec2types.NetworkInterface{
+			NetworkInterfaceId: aws.String("eni-092a6e24ee8701c61"),
+			Description:        aws.String("ELB net/ingress/818502e1be7cef4d"),
+			InterfaceType:      ec2types.NetworkInterfaceTypeNetworkLoadBalancer,
+			Status:             ec2types.NetworkInterfaceStatusInUse,
+			RequesterManaged:   aws.Bool(true),
+			PrivateIpAddress:   aws.String("10.17.204.134"),
+			Association:        &ec2types.NetworkInterfaceAssociation{PublicIp: aws.String("15.240.22.35")},
+			PrivateIpAddresses: []ec2types.NetworkInterfacePrivateIpAddress{{
+				Primary:          aws.Bool(true),
+				PrivateIpAddress: aws.String("10.17.204.134"),
+				Association:      &ec2types.NetworkInterfaceAssociation{PublicIp: aws.String("15.240.22.35")},
+			}},
+			VpcId:            aws.String("vpc-0fe2306fe8af32c4a"),
+			SubnetId:         aws.String("subnet-050b1092769a6e9b0"),
+			AvailabilityZone: aws.String("af-south-1c"),
+		},
+	}
+}
+
+func TestSummaryAttributes_NetworkInterface(t *testing.T) {
+	t.Run("nlb frontend with an auto-assigned address", func(t *testing.T) {
+		attrs := summaryAttributes(nlbNetworkInterface())
+		require.NotNil(t, attrs)
+
+		assert.Equal(t, "15.240.22.35", attrs["public_ip"])
+		assert.Equal(t, "10.17.204.134", attrs["private_ip"])
+		assert.Equal(t, false, attrs["elastic_ip"], "an auto-assigned address must not read as an Elastic IP")
+		assert.Equal(t, "network_load_balancer", attrs["interface_type"])
+		assert.Equal(t, "ELB net/ingress/818502e1be7cef4d", attrs["description"],
+			"description is how a caller finds one load balancer's interfaces")
+		assert.Equal(t, "in-use", attrs["state"])
+		assert.Equal(t, true, attrs["requester_managed"])
+		assert.Equal(t, "af-south-1c", attrs["availability_zone"])
+		assert.NotContains(t, attrs, "public_ips", "a single address is not repeated as a list")
+	})
+
+	t.Run("instance interface with secondary addresses", func(t *testing.T) {
+		eni := nlbNetworkInterface()
+		eni.InterfaceType = ec2types.NetworkInterfaceTypeInterface
+		eni.RequesterManaged = aws.Bool(false)
+		eni.Association.AllocationId = aws.String("eipalloc-1")
+		eni.Attachment = &ec2types.NetworkInterfaceAttachment{InstanceId: aws.String("i-1")}
+		eni.PrivateIpAddresses = append(eni.PrivateIpAddresses, ec2types.NetworkInterfacePrivateIpAddress{
+			PrivateIpAddress: aws.String("10.17.204.135"),
+			Association:      &ec2types.NetworkInterfaceAssociation{PublicIp: aws.String("15.240.22.36")},
+		})
+
+		attrs := summaryAttributes(eni)
+		require.NotNil(t, attrs)
+
+		assert.Equal(t, true, attrs["elastic_ip"])
+		assert.Equal(t, "i-1", attrs["instance_id"])
+		assert.Equal(t, []string{"10.17.204.134", "10.17.204.135"}, attrs["private_ips"])
+		assert.Equal(t, []string{"15.240.22.35", "15.240.22.36"}, attrs["public_ips"])
+	})
+
+	t.Run("private only", func(t *testing.T) {
+		eni := nlbNetworkInterface()
+		eni.Association = nil
+		eni.PrivateIpAddresses[0].Association = nil
+
+		attrs := summaryAttributes(eni)
+		assert.NotContains(t, attrs, "public_ip")
+		assert.NotContains(t, attrs, "elastic_ip", "elastic_ip only qualifies an address that exists")
+	})
+}
+
+// The question this type answers is "what are this load balancer's IPs", so the
+// description filter has to select exactly its interfaces.
+func TestNetworkInterfaceFilterByDescription(t *testing.T) {
+	eni := nlbNetworkInterface()
+	other := nlbNetworkInterface()
+	other.Description = aws.String("Interface for NAT Gateway nat-1")
+
+	filter := resourceFilter{hasAttr: true, attrKey: "description", attrVal: "ELB net/ingress/818502e1be7cef4d"}
+	assert.True(t, filter.matches(eni, summaryAttributes(eni)))
+	assert.False(t, filter.matches(other, summaryAttributes(other)))
+}
+
+// A global type with no region must not sweep every region: awslib answers it
+// from us-east-1 alone, and building a client per (account, region) first is
+// what made count_resources on CloudFront distributions time out.
+func TestResolveTypeRegions(t *testing.T) {
+	regions, err := resolveTypeRegions(awscfg.ResourceTypeDistribution, "")
+	require.NoError(t, err)
+	assert.Equal(t, []ptypes.AwsRegion{ptypes.DefaultAwsRegion}, regions)
+
+	regions, err = resolveTypeRegions(awscfg.ResourceTypeNetworkInterface, "")
+	require.NoError(t, err)
+	assert.Greater(t, len(regions), 1, "a regional type still sweeps every region")
+
+	regions, err = resolveTypeRegions(awscfg.ResourceTypeDistribution, "eu-west-1")
+	require.NoError(t, err)
+	assert.Equal(t, []ptypes.AwsRegion{"eu-west-1"}, regions, "an explicit region is honoured")
+
+	_, err = resolveTypeRegions(awscfg.ResourceTypeDistribution, "mars-1")
+	assert.Error(t, err, "region validation still applies")
 }

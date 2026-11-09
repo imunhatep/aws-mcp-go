@@ -53,11 +53,11 @@ as `cursor` for the next page). `limit` defaults to 50 (max 1000).
 
 The curated `attributes` surface the most relevant provider-native fields per
 type — an EC2 instance yields `instance_type`, `instance_family`, `state`,
-`private_ip`; RDS yields `engine`, `instance_class`, `status`, `endpoint`; a load
+`private_ip`, `public_ip`; RDS yields `engine`, `instance_class`, `status`, `endpoint`; a load
 balancer yields `lb_type`, `scheme`, `dns_name`, `state`. Curated types include
-EC2 (instance/volume/snapshot/vpc), RDS (instance/snapshot), ELBv2, ECS
+EC2 (instance/volume/snapshot, VPC networking, EIPs and network interfaces), RDS (instance/snapshot), ELBv2, ECS
 (cluster/service), EKS, Lambda, DynamoDB, S3, Route53, Secrets Manager, EFS, SQS,
-SNS, IAM users, Auto Scaling groups and CloudFront (distribution tenants /
+SNS, IAM users, Auto Scaling groups and CloudFront (distributions, distribution tenants /
 connection groups).
 
 Filters narrow results server-side (so payload scales with the answer, not the

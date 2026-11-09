@@ -53,7 +53,7 @@ func (s *Server) registerTools() {
 				mcp.Description("Optional AWS account ID. Scopes the query to that one account — only its credentials are used and only it is called, rather than querying every reachable account and filtering the rows. An account this server cannot reach is an error, not an empty result. Call list_accounts for the reachable IDs."),
 			),
 			mcp.WithString("view",
-				mcp.Description("Response richness per row: 'id' (default, thin: identity + state), 'summary' (adds tags and curated attributes like instance_type/engine/dns_name), or 'detail' (adds a raw field with the full provider-native entity). Use detail only with a region + filters so the result stays small."),
+				mcp.Description("Response richness per row: 'id' (default, thin: identity + state), 'summary' (adds tags and curated attributes like instance_type/engine/dns_name/public_ip/private_ip; IPs are not in the id view), or 'detail' (adds a raw field with the full provider-native entity). Use detail only with a region + filters so the result stays small."),
 			),
 			mcp.WithString("state",
 				mcp.Description("Filter by lifecycle state/status, case-insensitive (e.g. 'running' for EC2, 'available' for RDS). Matched against each resource's state field."),
@@ -213,7 +213,7 @@ func (s *Server) handleListResources(ctx context.Context, req mcp.CallToolReques
 	}
 
 	regionArg := req.GetString("region", "")
-	regions, err := resolveRegions(regionArg)
+	regions, err := resolveTypeRegions(rt, regionArg)
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("invalid region", err), nil
 	}
@@ -275,7 +275,7 @@ func (s *Server) handleCountResources(ctx context.Context, req mcp.CallToolReque
 	}
 
 	regionArg := req.GetString("region", "")
-	regions, err := resolveRegions(regionArg)
+	regions, err := resolveTypeRegions(rt, regionArg)
 	if err != nil {
 		return mcp.NewToolResultErrorFromErr("invalid region", err), nil
 	}

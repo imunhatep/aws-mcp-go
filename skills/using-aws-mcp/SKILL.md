@@ -1,6 +1,6 @@
 ---
 name: using-aws-mcp
-description: Use whenever a question is about AWS resources, inventory or spend and the aws MCP server (aws-mcp) is connected — "how many / list / which X do we have", "what does Y cost", "forecast", "what caused this cost anomaly", "savings plans", "why can't you see account Z". Covers choosing between list_resources, count_resources and list_resources_fallback (the Cloud Control fallback that serves almost every type NOT in list_resource_types — NAT gateways, ENIs, KMS keys, IAM roles, ECR, ElastiCache, MSK, OpenSearch, Kinesis, Step Functions, API Gateway, Transit Gateway…), reading the queried/warnings envelope, account scoping, Cost Explorer query recipes, forecasts, Cost Anomaly Detection findings and monitors, Savings Plans inventory and rates, auth troubleshooting in every authentication mode, and — only on a server started with --read-write — Cloud Control create/update/delete and bulk tagging.
+description: Use whenever a question is about AWS resources, inventory or spend and the aws MCP server (aws-mcp) is connected — "how many / list / which X do we have", "what does Y cost", "forecast", "what caused this cost anomaly", "savings plans", "why can't you see account Z". Covers choosing between list_resources, count_resources and list_resources_fallback (the Cloud Control fallback that serves almost every type NOT in list_resource_types — NAT gateways, KMS keys, IAM roles, ECR, ElastiCache, MSK, OpenSearch, Kinesis, Step Functions, API Gateway, Transit Gateway…), reading the queried/warnings envelope, account scoping, Cost Explorer query recipes, forecasts, Cost Anomaly Detection findings and monitors, Savings Plans inventory and rates, auth troubleshooting in every authentication mode, and — only on a server started with --read-write — Cloud Control create/update/delete and bulk tagging.
 ---
 
 # Using the aws MCP server
@@ -67,12 +67,12 @@ list_resource_types  ──► type listed? ──yes──► "how many / by X"
 `list_resource_types` holds roughly 40 curated types:
 
 - **EC2:** instances, volumes, snapshots, VPCs, subnets, security groups, route
-  tables, VPC endpoints and EIPs.
+  tables, VPC endpoints, EIPs and network interfaces (ENIs).
 - **RDS:** instances and snapshots.
 - **Others:** ELBv2, ECS clusters and services, EKS, Lambda, DynamoDB, S3,
   Route53 zones/records/domains, Secrets Manager, EFS, SQS, SNS, IAM users, ASGs,
   CloudWatch log groups, Glue, EMR / EMR Serverless, Batch, and CloudFront
-  distribution tenants and connection groups.
+  distributions, distribution tenants and connection groups.
 
 Call `list_resource_types` rather than trusting this list. Both forms work for
 these types: `AWS::EC2::Instance` and `aws_ec2_instance`. Asking
@@ -96,7 +96,9 @@ filters `state`, `tag` and `attribute`.
 - **`view`** (`list_resources` only):
   - `id` (default): identity plus state.
   - `summary`: adds `tags` and curated `attributes` such as `instance_type`,
-    `engine` and `dns_name`.
+    `engine`, `dns_name`, `public_ip` and `private_ip`. **IP addresses,
+    origins and every other attribute are absent from the default `id` view**;
+    an empty `id` row says nothing about whether a resource has a public IP.
   - `detail`: adds `raw`, the full SDK struct. Use it only with a region and
     filters.
 - **Paging**: `limit` (default 50, max 1000) and `cursor`. Pass back
@@ -114,6 +116,21 @@ count_resources {"resource_type":"AWS::EC2::Instance","account_id":"<id>","state
 
 // Idle Elastic IPs (EIP state is derived: associated / unassociated)
 list_resources {"resource_type":"AWS::EC2::EIP","state":"unassociated","view":"summary"}
+
+// Elastic IPs with their public and private addresses
+list_resources {"resource_type":"AWS::EC2::EIP","region":"<region>","view":"summary"}
+
+// Every public IP in a region, Elastic or auto-assigned (instances, NLBs, NAT
+// gateways all hold theirs on an ENI). Rows without public_ip are private-only.
+list_resources {"resource_type":"AWS::EC2::NetworkInterface","region":"<region>","view":"summary","limit":1000}
+
+// An NLB's frontend IPs. DescribeLoadBalancers reports none unless EIPs are
+// attached; the per-AZ ENIs carry them. Description is "ELB net/<name>/<id>",
+// the last two segments of the load balancer ARN.
+list_resources {"resource_type":"AWS::EC2::NetworkInterface","region":"<region>","attribute":"description=ELB net/<name>/<id>","view":"summary"}
+
+// CloudFront distributions with aliases and origins (global: pass region us-east-1)
+list_resources {"resource_type":"AWS::CloudFront::Distribution","region":"us-east-1","view":"summary"}
 
 // Unattached EBS volumes by region and account
 count_resources {"resource_type":"AWS::EC2::Volume","state":"available","group_by":"region,account_id"}
@@ -140,7 +157,6 @@ Commonly asked types that are **not** curated, all of which go here:
 | Asked for | `resource_type` |
 |---|---|
 | NAT gateways | `AWS::EC2::NatGateway` |
-| Network interfaces (ENIs) | `AWS::EC2::NetworkInterface` |
 | Transit gateways / attachments | `AWS::EC2::TransitGateway`, `AWS::EC2::TransitGatewayAttachment` |
 | Internet gateways | `AWS::EC2::InternetGateway` |
 | Launch templates | `AWS::EC2::LaunchTemplate` |
@@ -153,7 +169,6 @@ Commonly asked types that are **not** curated, all of which go here:
 | Kinesis / Firehose | `AWS::Kinesis::Stream`, `AWS::KinesisFirehose::DeliveryStream` |
 | Step Functions | `AWS::StepFunctions::StateMachine` |
 | API Gateway | `AWS::ApiGateway::RestApi`, `AWS::ApiGatewayV2::Api` |
-| CloudFront distributions (classic) | `AWS::CloudFront::Distribution` (global, so pass `region: us-east-1`) |
 | WAFv2 / ACM / SSM params | `AWS::WAFv2::WebACL`, `AWS::CertificateManager::Certificate`, `AWS::SSM::Parameter` |
 
 These names come from the CloudFormation resource reference and are not

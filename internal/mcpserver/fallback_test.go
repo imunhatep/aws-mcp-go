@@ -1,6 +1,7 @@
 package mcpserver
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -84,7 +85,7 @@ func TestResolveFallbackResourceType(t *testing.T) {
 // TestResolveFallbackResourceTypeAcceptsUnsupportedTypes is the point of the
 // whole feature: a type ResolveResourceType rejects must still resolve here.
 func TestResolveFallbackResourceTypeAcceptsUnsupportedTypes(t *testing.T) {
-	const raw = "AWS::CloudFront::Distribution"
+	const raw = "AWS::EC2::NatGateway"
 
 	_, ok := ResolveResourceType(raw)
 	require.False(t, ok, "precondition: the typed path must not support this type")
@@ -324,4 +325,31 @@ func joined(warnings []string) string {
 		out += w + "\n"
 	}
 	return out
+}
+
+// The Cloud Control entity holds its property bag twice — the API's Properties
+// string and the parsed Attributes — and the detail view used to serialize both,
+// which pushed a single CloudFront distribution past the tool-result limit.
+func TestFallbackDetailCarriesPropertiesOnce(t *testing.T) {
+	res := sampleFallbackResource("eu-north-1", "", map[string]any{
+		"QueueName": "jobs",
+		"RedrivePolicy": map[string]any{
+			"maxReceiveCount": float64(5),
+		},
+	})
+	res.Properties = aws.String(`{"QueueName":"jobs","RedrivePolicy":{"maxReceiveCount":5}}`)
+
+	dto := toResourceDTO(res, viewDetail)
+	require.NotNil(t, dto.Raw)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(dto.Raw, &raw))
+
+	assert.Nil(t, raw["Properties"], "the unparsed Properties string must not be serialized")
+	attrs, ok := raw["Attributes"].(map[string]any)
+	require.True(t, ok, "the parsed attributes are the detail")
+	assert.Equal(t, "jobs", attrs["QueueName"])
+	assert.Equal(t, "res-1", raw["Identifier"])
+
+	assert.NotNil(t, res.Properties, "rawEntity must not mutate the caller's resource")
 }

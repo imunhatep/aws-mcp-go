@@ -12,6 +12,8 @@ import (
 	"github.com/imunhatep/awslib/proxy"
 	"github.com/imunhatep/awslib/resources"
 	"github.com/imunhatep/awslib/service"
+	"github.com/imunhatep/awslib/service/cfg"
+	"github.com/imunhatep/gocollection/slice"
 
 	awscfg "github.com/aws/aws-sdk-go-v2/service/configservice/types"
 
@@ -36,6 +38,22 @@ func resolveRegions(regionArg string) ([]ptypes.AwsRegion, error) {
 		return nil, errors.Errorf("unknown region %q; call list_regions for valid values", regionArg)
 	}
 	return []ptypes.AwsRegion{ptypes.AwsRegion(regionArg)}, nil
+}
+
+// resolveTypeRegions is resolveRegions for a typed query. A global type asked
+// for without a region resolves to DefaultAwsRegion alone: awslib's
+// RepoProxyPool.List collapses global types to us-east-1 anyway (and region
+// narrowing always keeps it), so the result is identical — but sweeping every
+// region first built and authenticated a client per (account, region) pair only
+// to discard all but one. Across 19 accounts on a cold server that took longer
+// than the client's timeout, so count_resources on CloudFront distributions never
+// answered.
+func resolveTypeRegions(rt awscfg.ResourceType, regionArg string) ([]ptypes.AwsRegion, error) {
+	if regionArg == "" && slice.Contains(cfg.ResourceTypeListGlobal(), rt) {
+		return []ptypes.AwsRegion{ptypes.DefaultAwsRegion}, nil
+	}
+
+	return resolveRegions(regionArg)
 }
 
 // queryScope records what a query actually reached out to, so a caller can tell

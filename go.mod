@@ -15,7 +15,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi v1.41.4
 	github.com/aws/aws-sdk-go-v2/service/savingsplans v1.40.4
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.4
-	github.com/imunhatep/awslib v0.14.0
+	github.com/imunhatep/awslib v0.15.1
 	github.com/imunhatep/gocollection v0.2.1
 	github.com/mark3labs/mcp-go v1.3.0
 	github.com/rs/zerolog v1.35.1

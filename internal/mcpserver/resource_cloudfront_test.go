@@ -120,3 +120,71 @@ func TestSummaryAttributes_ConnectionGroup(t *testing.T) {
 	assert.Equal(t, true, attrs["is_default"])
 	assert.Equal(t, "d1234.cloudfront.net", attrs["routing_endpoint"])
 }
+
+// Classic distributions are typed now (awslib ListDistributions). Before, they
+// were reachable only through the Cloud Control fallback, whose detail view ran
+// to ~110k characters per distribution, so their origins were in practice
+// unreachable.
+func TestResolveResourceType_CloudFrontDistribution(t *testing.T) {
+	for _, raw := range []string{"AWS::CloudFront::Distribution", "aws_cloudfront_distribution"} {
+		rt, ok := ResolveResourceType(raw)
+		require.Truef(t, ok, "expected %q to resolve", raw)
+		assert.Equal(t, awscfg.ResourceTypeDistribution, rt)
+	}
+
+	global := false
+	for _, info := range supportedResourceTypeInfos() {
+		if info.Type == string(awscfg.ResourceTypeDistribution) {
+			global = info.Global
+		}
+	}
+	assert.True(t, global, "a distribution is global; per-region fan-out would duplicate rows")
+}
+
+func TestSummaryAttributes_Distribution(t *testing.T) {
+	e := cloudfront.Distribution{
+		AbstractResource: service.AbstractResource{
+			AccountID: ptypes.AwsAccountID("111111111111"),
+			Region:    ptypes.AwsRegion("us-east-1"),
+			ID:        "E131KALIESDPGZ",
+			Type:      awscfg.ResourceTypeDistribution,
+		},
+		DistributionSummary: cftypes.DistributionSummary{
+			Id:         aws.String("E131KALIESDPGZ"),
+			DomainName: aws.String("d1234.cloudfront.net"),
+			Status:     aws.String("Deployed"),
+			Enabled:    aws.Bool(true),
+			Aliases:    &cftypes.Aliases{Quantity: aws.Int32(1), Items: []string{"www.example.com"}},
+			Origins: &cftypes.Origins{Quantity: aws.Int32(2), Items: []cftypes.Origin{
+				{
+					Id:                 aws.String("default_origin"),
+					DomainName:         aws.String("origin-fraa.example.com"),
+					CustomOriginConfig: &cftypes.CustomOriginConfig{},
+				},
+				{
+					Id:             aws.String("assets"),
+					DomainName:     aws.String("assets.s3.amazonaws.com"),
+					OriginPath:     aws.String("/static"),
+					S3OriginConfig: &cftypes.S3OriginConfig{},
+				},
+			}},
+			DefaultCacheBehavior: &cftypes.DefaultCacheBehavior{TargetOriginId: aws.String("default_origin")},
+			WebACLId:             aws.String("arn:aws:wafv2:us-east-1:111111111111:global/webacl/x/1"),
+			PriceClass:           cftypes.PriceClassPriceClassAll,
+		},
+	}
+
+	attrs := summaryAttributes(e)
+	require.NotNil(t, attrs)
+
+	assert.Equal(t, "Deployed", attrs["state"])
+	assert.Equal(t, true, attrs["enabled"])
+	assert.Equal(t, "d1234.cloudfront.net", attrs["domain_name"])
+	assert.Equal(t, []string{"www.example.com"}, attrs["aliases"])
+	assert.Equal(t, "default_origin", attrs["default_origin_id"])
+	assert.Equal(t, []map[string]any{
+		{"id": "default_origin", "domain_name": "origin-fraa.example.com", "kind": "custom"},
+		{"id": "assets", "domain_name": "assets.s3.amazonaws.com", "path": "/static", "kind": "s3"},
+	}, attrs["origins"])
+	assert.Equal(t, "PriceClass_All", attrs["price_class"])
+}

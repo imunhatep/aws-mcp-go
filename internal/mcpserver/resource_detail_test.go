@@ -83,3 +83,13 @@ func TestToResourceDTO_DetailIncludesFullEntity(t *testing.T) {
 	require.True(t, ok, "State must be present in raw detail")
 	assert.Equal(t, "running", state["Name"])
 }
+
+// An auto-assigned public address is reported by DescribeInstances exactly like
+// an Elastic IP, so the summary view has to carry it.
+func TestToResourceDTO_InstancePublicIp(t *testing.T) {
+	instance := sampleInstance()
+	instance.PublicIpAddress = aws.String("3.120.0.10")
+
+	assert.Equal(t, "3.120.0.10", toResourceDTO(instance, viewSummary).Attributes["public_ip"])
+	assert.Nil(t, toResourceDTO(instance, viewID).Attributes, "the id view carries no attributes, IPs included")
+}
